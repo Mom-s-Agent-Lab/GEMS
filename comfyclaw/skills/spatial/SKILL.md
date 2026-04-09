@@ -1,30 +1,45 @@
-# Skill: Spatial Intelligence & Layout
-
-## Description
-This skill should be triggered when the user's request involves multiple objects, complex scene arrangements, or specific physical relationships between elements.
-- **Trigger when**: The request includes terms like "on the left/right," "above/below," "behind/in front of," "taller than," "partially hidden," "jumping over," "in a circle," or when multiple distinct characters/objects need to interact in a specific setting.
-- **Do NOT trigger when**: The request is for a single, centered subject with no background or specific spatial constraints.
-
+---
+name: spatial
+description: >-
+  Rewrite prompts to explicitly encode spatial relationships and physical
+  arrangements between objects. Use when the user describes scenes with
+  multiple elements using words like "on the left/right", "above/below",
+  "behind/in front of", "jumping over", "in a circle", "partially hidden",
+  or when multiple characters or objects need to interact in a specific
+  layout. Diffusion models struggle with implicit spatial language — making
+  it explicit here dramatically reduces positioning errors.
+license: MIT
+metadata:
+  author: davidliuk
+  version: "0.2.0"
 ---
 
-## Instructions
-When this skill is active, rewrite the user's prompt explicitly covering all 10 spatial dimensions to ensure high-order spatial reasoning and physical consistency:
+Rewrite the prompt by covering the spatial dimensions relevant to the scene.
+Not all ten dimensions apply to every scene — include only those that matter
+for this particular layout.
 
-1.  **Object Category (S1):** List all specific objects and components.
-2.  **Object Attribution (S2):** Define colors, materials, and textures for each object.
-3.  **Spatial Position (S3):** Use absolute coordinates (e.g., top-left, center) or relative positions (e.g., to the left of X).
-4.  **Spatial Orientation (S4):** Specify facing directions (e.g., facing left, upside down, profile view).
-5.  **Spatial Layout (S5):** Describe group arrangements (e.g., in a circle, a straight line, a "V" shape).
-6.  **Spatial Comparison (S6):** Define relative sizes or quantities (e.g., twice as large as X, three times taller than Y).
-7.  **Spatial Proximity (S7):** Describe physical distances (e.g., touching, far from, 5 inches apart).
-8.  **Spatial Occlusion (S8):** Detail 3D layering and depth (e.g., X partially obscuring Y).
-9.  **Spatial Motion (S9):** Capture dynamic states (e.g., mid-air, jumping over, liquid splashing).
-10. **Spatial Causal Interaction (S10):** Link causes to effects (e.g., wind blowing a cloak, a ball hitting water to create ripples).
+## Spatial dimension reference
 
-Writing Principles:
-- **Logical Soundness:** Ensure no cyclical layout errors (e.g., avoid "A is left of B, B is left of A").
-- **Explicitness:** Replace vague words like "nearby" with "standing 2 feet away on the right side".
-- **Format:** Output the result as a single, fluent, and descriptive paragraph. Do not use bullet points in the final prompt.
+| Dimension | What to specify | Example |
+|---|---|---|
+| **S1 Object list** | Name every distinct object | "a red apple, a wooden table, a ceramic bowl" |
+| **S2 Attribution** | Color, material, texture per object | "matte black, rough oak, translucent glass" |
+| **S3 Position** | Absolute or relative placement | "centered top-third", "to the left of X" |
+| **S4 Orientation** | Facing direction, rotation | "facing left", "upside down", "profile view" |
+| **S5 Group layout** | Arrangement of multiple items | "arranged in a V-shape", "stacked", "in a row" |
+| **S6 Relative size** | Comparisons between objects | "twice as tall as X", "smaller than Y" |
+| **S7 Proximity** | Physical distance | "touching", "5 cm apart", "far in the background" |
+| **S8 Occlusion** | 3D layering and depth | "X partially behind Y", "hidden below the table" |
+| **S9 Motion state** | Dynamic or mid-action poses | "mid-jump", "pouring liquid", "arm mid-swing" |
+| **S10 Causal link** | Cause → visible effect | "wind blowing → cloak billowing to the right" |
 
-## Output Format
-Return ONLY the final enhanced prompt text. Do not include any conversational filler, introductory remarks, or prefixes like "Enhanced prompt:".
+## Output format
+
+Write the result as a **single fluent paragraph** — no bullet points. Replace
+vague spatial words ("nearby", "next to") with precise descriptions
+("standing 30 cm to the right of X, facing toward it").
+
+## Consistency check
+
+Before outputting, verify there are no circular contradictions
+(e.g. "A is left of B" AND "B is left of A"). Fix any that exist.

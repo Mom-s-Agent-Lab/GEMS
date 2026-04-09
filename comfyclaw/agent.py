@@ -41,22 +41,37 @@ Iteration strategy
 ------------------
 1. Call report_evolution_strategy first: state your plan and the top issue.
 2. Call inspect_workflow to see the current topology.
-3. Call query_available_models BEFORE adding any LoRA or ControlNet node.
-4. Apply structural upgrades (LoRA / ControlNet / regional / hires / inpaint).
-5. Also tune prompt text, steps, CFG, and seed as needed.
-6. Call finalize_workflow when done.
+3. If a relevant skill is listed in <available_skills>, call read_skill to load
+   its full instructions BEFORE applying that upgrade.
+4. Call query_available_models BEFORE adding any LoRA or ControlNet node.
+5. Apply structural upgrades (LoRA / ControlNet / regional / hires / inpaint).
+6. Also tune prompt text, steps, CFG, and seed as needed.
+7. Call finalize_workflow when done.
+
+Using skills (progressive disclosure)
+--------------------------------------
+Skills are specialised instruction sets for specific upgrade patterns.  At startup
+you can see each skill's name and description in <available_skills>.  When you decide
+to apply a skill, call read_skill("<skill-name>") to load the full instructions.  Only
+load skills you actually intend to use — each read consumes context.
 
 Decision heuristics
 -------------------
-  Flat / low-depth background          → add_controlnet (depth)
-  Blurry edges / lost structure        → add_controlnet (canny)
-  Wrong human pose / body              → add_controlnet (pose)
-  Plasticky skin / poor texture        → add_lora_loader (detail/texture)
-  Wrong anatomy (hands, fingers)       → add_lora_loader (anatomy) or inpaint
-  Style inconsistency                  → add_lora_loader (style)
-  Subject and background bleed         → add_regional_attention
-  Low resolution / soft fine detail    → add_hires_fix
+  Flat / low-depth background          → read_skill("controlnet-control"), add depth
+  Blurry edges / lost structure        → read_skill("controlnet-control"), add canny
+  Wrong human pose / body              → read_skill("controlnet-control"), add pose
+  Plasticky skin / poor texture        → read_skill("lora-enhancement"), detail LoRA
+  Wrong anatomy (hands, fingers)       → read_skill("lora-enhancement"), anatomy LoRA
+  Style inconsistency                  → read_skill("lora-enhancement"), style LoRA
+  Subject and background bleed         → read_skill("regional-control")
+  Low resolution / soft fine detail    → read_skill("hires-fix")
   Localised artifact in one area       → add_inpaint_pass
+  User asks for photorealistic image   → read_skill("photorealistic")
+  User asks for high quality / sharp   → read_skill("high-quality")
+  User asks for creative / artistic    → read_skill("creative")
+  Prompt is flat / needs artistic depth→ read_skill("prompt-artist")
+  Multiple objects with spatial layout → read_skill("spatial")
+  Text / sign / label in the image     → read_skill("text-rendering")
 
 Node parameter constraints (DO NOT violate)
 -------------------------------------------
@@ -84,13 +99,17 @@ The image-generation model for this session is LOCKED to: {model_name}
 """
 
 
-def _build_system_prompt(pinned_image_model: str | None) -> str:
-    """Return the system prompt, injecting the pinned-model section when set."""
+def _build_system_prompt(
+    pinned_image_model: str | None,
+    available_skills_xml: str = "",
+) -> str:
+    """Return the full system prompt with optional pinned-model and skills sections."""
+    prompt = _SYSTEM_PROMPT_BASE
+    if available_skills_xml:
+        prompt += f"\n{available_skills_xml}\n"
     if pinned_image_model:
-        return _SYSTEM_PROMPT_BASE + _PINNED_MODEL_SECTION.format(
-            model_name=pinned_image_model
-        )
-    return _SYSTEM_PROMPT_BASE
+        prompt += _PINNED_MODEL_SECTION.format(model_name=pinned_image_model)
+    return prompt
 
 # ---------------------------------------------------------------------------
 # Tool definitions
@@ -287,6 +306,24 @@ _TOOLS: list[dict] = [
             "required": ["rationale"],
         },
     },
+    {
+        "name": "read_skill",
+        "description": (
+            "Load the full instructions for a named skill (progressive disclosure). "
+            "Call this BEFORE applying a skill's technique. "
+            "Available skill names are listed in <available_skills> in the system prompt."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "skill_name": {
+                    "type": "string",
+                    "description": "Exact skill name as shown in <available_skills>.",
+                },
+            },
+            "required": ["skill_name"],
+        },
+    },
 ]
 
 
@@ -355,7 +392,10 @@ class ClawAgent:
         rationale = "(no rationale provided)"
         rounds = 0
 
-        system_prompt = _build_system_prompt(self.pinned_image_model)
+        system_prompt = _build_system_prompt(
+            self.pinned_image_model,
+            available_skills_xml=self.skill_manager.build_available_skills_xml(),
+        )
 
         while rounds < self.max_tool_rounds:
             rounds += 1
@@ -469,11 +509,38 @@ class ClawAgent:
                     print(f"[ClawAgent] 🎯 {inputs.get('rationale','')}")
                     return "Workflow finalized.", True
 
+                case "read_skill":
+                    return self._read_skill(inputs["skill_name"]), False
+
                 case _:
                     return f"❌ Unknown tool: {name}", False
 
         except Exception as exc:
             return f"❌ Tool error ({name}): {exc}", False
+
+    # ------------------------------------------------------------------
+    # Skill reader (progressive disclosure — stage 2)
+    # ------------------------------------------------------------------
+
+    def _read_skill(self, skill_name: str) -> str:
+        """
+        Load the full body of a named skill on demand.
+
+        This is the **stage-2** of progressive disclosure: the agent calls
+        ``read_skill`` from within a tool-use loop after deciding which skill
+        to apply.  The body text is returned as the tool result so the agent
+        can follow the instructions immediately.
+        """
+        try:
+            body = self.skill_manager.get_body(skill_name)
+        except KeyError:
+            available = ", ".join(self.skill_manager.skill_names)
+            return (
+                f"❌ Skill {skill_name!r} not found. "
+                f"Available skills: {available or '(none)'}"
+            )
+        print(f"[ClawAgent] 📖 read_skill: {skill_name}")
+        return f"## Instructions for skill: {skill_name}\n\n{body}"
 
     # ------------------------------------------------------------------
     # Topology builders
@@ -731,14 +798,14 @@ class ClawAgent:
     ) -> str:
         parts = [f"## Image Prompt\n{original_prompt}", f"## Iteration\n{iteration}"]
 
-        # Inject skill manifest + relevant instructions
-        manifest = self.skill_manager.get_manifest()
-        if manifest != "(no skills loaded)":
-            parts.append(f"## Available Skills\n{manifest}")
-
-        relevant_instructions = self.skill_manager.get_relevant_instructions(original_prompt)
-        if relevant_instructions:
-            parts.append(f"## Skill Instructions (relevant to this prompt)\n{relevant_instructions}")
+        # Hint at relevant skills (names only — full instructions loaded via read_skill)
+        relevant = self.skill_manager.detect_relevant_skills(original_prompt)
+        if relevant:
+            hint = ", ".join(relevant)
+            parts.append(
+                f"## Suggested Skills\nThese skills may be relevant to this prompt: {hint}\n"
+                "Call read_skill(<name>) to load the full instructions before applying."
+            )
 
         if verifier_feedback:
             parts.append(

@@ -331,7 +331,7 @@ main generation loop.
 
 ## Agent tools
 
-The Claude agent has 13 tools grouped by category:
+The Claude agent has 14 tools grouped by category:
 
 | Category | Tool | What it does |
 |---|---|---|
@@ -346,74 +346,91 @@ The Claude agent has 13 tools grouped by category:
 | Regional | `add_regional_attention` | Split conditioning into foreground/background regions |
 | Refinement | `add_hires_fix` | Add LatentUpscaleBy + second KSampler + VAEDecode |
 | Refinement | `add_inpaint_pass` | Add targeted inpaint stage for a specific region |
+| Skills | `read_skill` | Load full instructions for a named skill on demand |
 | Control | `report_evolution_strategy` | Declare plan before making changes |
 | Control | `finalize_workflow` | Signal completion and return rationale |
 
 ### Agent decision heuristics
 
-The agent is instructed to choose tools based on verifier feedback:
+The agent is instructed to load a skill's full instructions before applying a technique,
+then choose tools based on verifier feedback:
 
-| Verifier finding | Agent action |
-|---|---|
-| Flat / low-depth background | `add_controlnet` (depth model) |
-| Blurry edges / lost structure | `add_controlnet` (canny model) |
-| Wrong human pose / body | `add_controlnet` (pose model) |
-| Plasticky skin / poor texture | `add_lora_loader` (detail/texture LoRA) |
-| Wrong anatomy (hands, fingers) | `add_lora_loader` (anatomy LoRA) or `add_inpaint_pass` |
-| Style inconsistency | `add_lora_loader` (style LoRA) |
-| Subject and background bleed | `add_regional_attention` |
-| Low resolution / soft fine detail | `add_hires_fix` |
-| Localised artifact in one area | `add_inpaint_pass` |
+| Verifier finding | Skill to read | Primary tool |
+|---|---|---|
+| Flat / low-depth background | `controlnet-control` | `add_controlnet` (depth) |
+| Blurry edges / lost structure | `controlnet-control` | `add_controlnet` (canny) |
+| Wrong human pose / body | `controlnet-control` | `add_controlnet` (pose) |
+| Plasticky skin / poor texture | `lora-enhancement` | `add_lora_loader` (detail) |
+| Wrong anatomy (hands, fingers) | `lora-enhancement` | `add_lora_loader` (anatomy) |
+| Style inconsistency | `lora-enhancement` | `add_lora_loader` (style) |
+| Subject and background bleed | `regional-control` | `add_regional_attention` |
+| Low resolution / soft fine detail | `hires-fix` | `add_hires_fix` |
+| Localised artifact in one area | — | `add_inpaint_pass` |
 
 ---
 
 ## Skills
 
-Skills are SKILL.md files that provide the agent with domain-specific guidance.
-The agent auto-detects which skills are relevant to the prompt via keyword
-matching and injects their full `## Instructions` section into the user message.
+ComfyClaw's skills system follows the [Anthropic Agent Skills specification](https://agentskills.dev/specification).
+Skills are directories containing a `SKILL.md` file with YAML frontmatter.
 
-Built-in skills (in `comfyclaw/skills/`):
+**Progressive disclosure** keeps the agent's context lean:
 
-| Skill | Trigger keywords |
+1. **Startup (stage 1)** — only `name` and `description` from each skill's frontmatter
+   are surfaced in an `<available_skills>` XML block in the system prompt.
+2. **On demand (stage 2)** — when the agent decides to apply a skill it calls
+   `read_skill("<name>")`, which loads the full instruction body at that moment.
+
+This means 11 skills can be registered without flooding the context window on every
+iteration.
+
+### Built-in skills
+
+| Skill | When the agent activates it |
 |---|---|
-| `high_quality` | quality, sharp, detailed, crisp |
-| `photorealistic` | photorealistic, photo, DSLR, realistic |
-| `creative` | creative, artistic, stylized |
-| `aesthetic_drawing` | drawing, illustration, anime, sketch |
-| `lora_enhancement` | detail, texture, anatomy, style, enhance |
-| `controlnet_control` | structure, depth, pose, canny, edges |
-| `regional_control` | region, foreground, background, separate |
-| `hires_fix` | high-res, hires, upscale, detail |
-| `spatial` | spatial, composition, layout |
-| `text_rendering` | text, typography, lettering |
-| `creative_drawing` | creative drawing, concept art |
+| `high-quality` | User asks for "high quality", "sharp", "detailed", "8K" |
+| `photorealistic` | "photo", "DSLR", "realistic", "cinematic", "RAW" |
+| `creative` | "creative", "artistic", "fantasy", "concept art", "surreal" |
+| `aesthetic-drawing` | "aesthetic drawing", "masterpiece", "award-winning", "professional art" |
+| `creative-drawing` | "cool", "dreamy", "futuristic", "artistic" (prompt upgrade) |
+| `lora-enhancement` | Verifier reports texture/lighting/anatomy defects |
+| `controlnet-control` | Verifier reports flat background, blurry edges, wrong pose |
+| `regional-control` | Subject and background style bleed |
+| `hires-fix` | Blurry output, soft detail, base resolution ≤ 768 |
+| `spatial` | Prompt involves multiple objects with spatial relationships |
+| `text-rendering` | Prompt contains quoted text, "a sign saying…", labels |
 
 ### Adding custom skills
 
-Create a directory with a `SKILL.md` and point the harness to it:
+Skills follow the [Agent Skills spec](https://agentskills.dev/specification) — a
+directory whose name is the skill's `name`, containing a `SKILL.md` with YAML
+frontmatter:
 
 ```
 my_skills/
-└── portrait_lighting/
+└── portrait-lighting/
     └── SKILL.md
 ```
 
-`SKILL.md` format:
+**Minimal `SKILL.md`:**
 
 ```markdown
-# Skill: Portrait Lighting
+---
+name: portrait-lighting
+description: >-
+  Optimise lighting for portrait photography. Use when the user mentions
+  "portrait", "face", "skin", "studio lighting", or asks for flattering
+  skin tone rendering.
+---
 
-## Description
-Optimize lighting for portrait photography. Trigger on: portrait, face, skin, lighting.
-
-## Instructions
-
-### Steps
-1. Add "dramatic studio lighting, rim light" to the positive prompt.
-2. Increase CFG to 8–9 for stronger lighting contrast.
-3. Consider add_controlnet with a normal map for skin texture.
+1. Append `, dramatic studio lighting, rim light, catchlights` to the positive prompt.
+2. Set KSampler CFG to 8.0–9.0 for stronger lighting contrast.
+3. Consider read_skill("controlnet-control") and add a normal-map ControlNet
+   for additional skin texture depth.
 ```
+
+Required frontmatter fields: `name` (kebab-case, must match directory name) and
+`description`.  Optional: `license`, `compatibility`, `allowed-tools`, `metadata`.
 
 ```bash
 comfyclaw run --workflow wf.json --prompt "…" --skills-dir ./my_skills/
@@ -421,6 +438,28 @@ comfyclaw run --workflow wf.json --prompt "…" --skills-dir ./my_skills/
 
 ```python
 cfg = HarnessConfig(api_key="…", skills_dir="./my_skills/")
+```
+
+### Using SkillManager directly
+
+```python
+from comfyclaw.skill_manager import SkillManager
+
+sm = SkillManager()                          # built-in skills
+sm = SkillManager("./my_skills/")           # custom dir
+
+# Stage-1: XML block for agent system prompt
+print(sm.build_available_skills_xml())
+
+# Stage-2: load full instructions on demand
+body = sm.get_body("lora-enhancement")
+
+# Lightweight heuristic matching
+relevant = sm.detect_relevant_skills("photorealistic portrait")
+# → ['photorealistic']
+
+# List of {name, description, location} dicts
+manifest = sm.get_manifest()
 ```
 
 ---
@@ -457,7 +496,7 @@ To get the API format from ComfyUI: **Workflow → Export (API)** in the menu.
 ### Running the tests
 
 ```bash
-# All 103 tests (fully offline — Anthropic API mocked)
+# All 136 tests (fully offline — Anthropic API mocked)
 uv run pytest
 
 # Verbose, specific module
@@ -495,33 +534,37 @@ comfyclaw/
 │   ├── __init__.py          custom_node_path(), public re-exports
 │   ├── client.py            ComfyClient — HTTP REST + polling
 │   ├── workflow.py          WorkflowManager — graph mutations
-│   ├── agent.py             ClawAgent — Claude tool-use loop
+│   ├── agent.py             ClawAgent — Claude tool-use loop (14 tools)
 │   ├── verifier.py          ClawVerifier — Claude vision QA
 │   ├── memory.py            ClawMemory — per-run attempt history
 │   ├── sync_server.py       SyncServer — WebSocket broadcast thread
-│   ├── skill_manager.py     SkillManager — SKILL.md loader & matcher
+│   ├── skill_manager.py     SkillManager — Agent Skills spec loader
 │   ├── harness.py           ClawHarness + HarnessConfig
 │   ├── cli.py               comfyclaw CLI entry point
 │   ├── custom_node/         ← bundled ComfyUI plugin
 │   │   ├── __init__.py      ComfyUI extension registration
 │   │   └── js/
 │   │       └── comfy_claw_sync.js   WebSocket client + canvas reload
-│   └── skills/              ← built-in skill SKILL.md files
-│       ├── high_quality/
+│   └── skills/              ← built-in skills (Agent Skills format)
+│       ├── high-quality/    SKILL.md with YAML frontmatter
 │       ├── photorealistic/
-│       ├── lora_enhancement/
-│       ├── controlnet_control/
-│       ├── regional_control/
-│       ├── hires_fix/
-│       └── …
+│       ├── creative/
+│       ├── aesthetic-drawing/
+│       ├── creative-drawing/
+│       ├── lora-enhancement/
+│       ├── controlnet-control/
+│       ├── regional-control/
+│       ├── hires-fix/
+│       ├── spatial/
+│       └── text-rendering/
 └── tests/
     ├── conftest.py
     ├── test_workflow.py      23 tests
     ├── test_memory.py        12 tests
-    ├── test_skill_manager.py 19 tests
+    ├── test_skill_manager.py 43 tests
     ├── test_verifier.py      16 tests
     ├── test_agent.py         17 tests
-    └── test_harness.py       16 tests
+    └── test_harness.py       25 tests
 ```
 
 ---
