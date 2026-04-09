@@ -1,95 +1,108 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to ComfyClaw are documented here.
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
-
-### Changed
-
-**Skills — Anthropic Agent Skills specification**
-- All 11 built-in skills now follow the [Agent Skills spec](https://agentskills.dev/specification):
-  YAML frontmatter (`name`, `description`, optional `license`, `compatibility`,
-  `allowed-tools`, `metadata`) followed by a plain Markdown instruction body.
-- Skill directories renamed from `snake_case` to `kebab-case` to match the required
-  `name` convention (`high_quality` → `high-quality`, `lora_enhancement` → `lora-enhancement`, etc.).
-- `SkillManager` completely rewritten:
-  - Parses YAML frontmatter with PyYAML; validates `name` matches directory name.
-  - `build_available_skills_xml()` — generates the Anthropic-standard
-    `<available_skills>` XML block (name + description + location only, stage 1).
-  - `get_body(name)` — lazy-loads the full instruction body on demand (stage 2).
-  - `detect_relevant_skills(prompt)` — keyword heuristic for hint suggestions.
-  - `get_manifest()` — returns `list[{name, description, location}]`.
-- `ClawAgent` updated for progressive disclosure:
-  - System prompt now embeds the `<available_skills>` XML block at startup.
-  - New **`read_skill`** tool (tool 14): agent calls this to load a skill's full
-    instructions before applying the technique, rather than having all instructions
-    injected up-front.
-  - `_build_user_message` now only hints at relevant skill names; full bodies are
-    never pre-loaded into the user message.
-- Added `pyyaml>=6` runtime dependency.
-- `test_skill_manager.py` fully rewritten: 43 tests covering frontmatter parsing,
-  validation, XML generation, progressive disclosure, and edge cases.
-
----
-
-## [0.1.0] — 2025-04-08
-
-Initial public release extracted from the `vision-harness` research monorepo.
+## [Unreleased] — 2026-04-09
 
 ### Added
 
-**Package structure**
-- Standalone `comfyclaw/` Python package, installable via `pip` or `uv`.
-- `pyproject.toml` with hatchling build backend, uv dependency groups, ruff/mypy config.
-- `uv.lock` + `.python-version` (3.13) for reproducible environments.
-- `.env.example` template covering all configuration variables.
-- MIT `LICENSE`.
+#### Qwen-Image-2512 support
+- New model skill `comfyclaw/skills/qwen-image-2512/SKILL.md` — covers the
+  native ComfyUI FP8 pipeline (`UNETLoader` + `CLIPLoader` + `VAELoader` +
+  `KSampler` + `EmptySD3LatentImage`), Lightning LoRA 4-step mode, recommended
+  aspect-ratio buckets, prompt-engineering guidance, and per-issue iteration
+  strategies.
+- New base workflow `qwen_workflow_api.json` — ready-to-use API-format workflow
+  for Qwen-Image-2512 (FP8, Lightning LoRA enabled, 16:9 landscape default).
+- Automatic Qwen model detection in `ClawAgent._build_user_message`: the agent
+  inspects the workflow for `UNETLoader` nodes whose `unet_name` contains
+  `"qwen_image"` (native FP8 format) or for legacy `QwenImageModelLoader`/
+  `RH_QwenImageGenerator` nodes, and automatically prepends `qwen-image-2512`
+  to the suggested-skills list.
+- System-prompt heuristic updated: when the workflow contains Qwen nodes the
+  agent is instructed to `read_skill("qwen-image-2512")` before any parameter
+  tuning.
 
-**Core modules**
-- `client.py` — `ComfyClient`: HTTP REST + polling against the ComfyUI API.
-- `workflow.py` — `WorkflowManager`: add / connect / delete / validate / clone nodes.
-- `agent.py` — `ClawAgent`: Claude Sonnet tool-use loop with 14 tools for workflow evolution.
-- `verifier.py` — `ClawVerifier`: Claude vision verifier with region-level analysis and configurable score weights.
-- `memory.py` — `ClawMemory`: per-run attempt history with configurable image-bytes cap.
-- `sync_server.py` — `SyncServer`: thread-safe WebSocket broadcast server.
-- `skill_manager.py` — `SkillManager`: SKILL.md loader with YAML frontmatter parsing and progressive-disclosure XML generation.
-- `harness.py` — `ClawHarness` + `HarnessConfig`: orchestrator with topology accumulation, early stopping, and context manager support.
-- `cli.py` — `comfyclaw` CLI with `run`, `dry-run`, `install-node`, `node-path` sub-commands; reads all config from env vars / `.env`.
+#### DreamShaper 8 LCM model skill
+- New model skill `comfyclaw/skills/dreamshaper8-lcm/SKILL.md` — documents LCM
+  sampler (`lcm`), scheduler (`sgm_uniform`), recommended steps (4–8), CFG
+  (1.5–2.5), and LCM-compatible hires-fix configuration.
+- System-prompt heuristic: active model name containing `"lcm"` triggers
+  automatic skill suggestion.
 
-**Agent tools (14)**
-`inspect_workflow`, `query_available_models`, `set_param`, `add_node`,
-`connect_nodes`, `delete_node`, `add_lora_loader`, `add_controlnet`,
-`add_regional_attention`, `add_hires_fix`, `add_inpaint_pass`,
-`report_evolution_strategy`, `finalize_workflow`, `read_skill`.
+#### Agentic error-repair loop (`harness.py`, `cli.py`)
+- **Queue-error repair**: when `queue_prompt` returns an HTTP 4xx rejection,
+  the agent receives the exact error message and gets up to
+  `max_repair_attempts` (default 2) chances to inspect and fix the workflow
+  topology before the iteration is abandoned.
+- **Execution-error repair**: when ComfyUI reports an execution-time error
+  (wrong types, invalid connections, missing inputs, etc.), the same repair
+  loop applies to the running graph.
+- **Infrastructure-fault detection**: errors matching `[Errno 32] Broken pipe`
+  or `BrokenPipeError` are classified as transient ComfyUI infrastructure
+  faults (caused by tqdm writing to a closed stderr pipe). These bypass the
+  agent-repair loop entirely; the harness waits 5 s and retries the same
+  workflow once without asking the agent to modify anything.
+- New `_build_repair_feedback` helper produces structured, actionable feedback
+  for the agent: verbatim error string, step-by-step fix instructions, list of
+  common root causes, and previous verifier feedback for context.
+- New `--max-repair-attempts N` CLI flag (also `COMFYCLAW_MAX_REPAIR_ATTEMPTS`
+  env var) to tune or disable the repair loop at runtime.
 
-**Built-in skills (11, Agent Skills format)**
-`high-quality`, `photorealistic`, `creative`, `aesthetic-drawing`,
-`lora-enhancement`, `controlnet-control`, `regional-control`, `hires-fix`,
-`spatial`, `text-rendering`, `creative-drawing`.
+#### Remote-access fixes for ComfyClaw-Sync
+- `SyncServer` default bind host changed from `127.0.0.1` to `0.0.0.0`, so the
+  WebSocket server is reachable when ComfyUI is accessed over a remote tunnel
+  or container port-forward.
+- `comfy_claw_sync.js` default WebSocket URL changed from the hardcoded
+  `ws://127.0.0.1:8765` to `ws://${window.location.hostname}:8765`, which
+  automatically follows the browser's current hostname.
+- `custom_node/__init__.py` docstring updated to explain the dynamic URL
+  resolution.
 
-**ComfyUI live-sync plugin**
-- `comfyclaw/custom_node/` bundled inside the Python package.
-- `comfy_claw_sync.js` v1.1: WebSocket client with auto-reconnect, three-method canvas reload (loadApiJson / loadGraphData / configure), status badge.
-- Fixed: JS was reading `msg.data` but Python sends `msg.workflow`.
-- `comfyclaw install-node` symlinks the bundled plugin; `comfyclaw node-path` prints its location.
-
-**Tests** — 136 tests, fully offline (Anthropic mocked)
-- `test_workflow.py` (23), `test_memory.py` (12), `test_skill_manager.py` (43),
-  `test_verifier.py` (16), `test_agent.py` (17), `test_harness.py` (25).
+#### Active-model injection in agent context
+- `ClawAgent._build_user_message` now extracts the active checkpoint/UNET model
+  name directly from the workflow (checking `CheckpointLoaderSimple`,
+  `CheckpointLoader`, and `UNETLoader` nodes) and surfaces it in the user
+  message so the agent can match model-specific skills without needing to call
+  `inspect_workflow` first.
 
 ### Fixed
-- `WorkflowManager.delete_node`: added `str()` coerce for node-ID comparison.
-- `ClawVerifier`: base64-encodes image bytes **once** before parallel threads (was re-encoding per question).
-- `ClawVerifier`: detects JPEG vs PNG from magic bytes (was hardcoded `image/png`).
-- `SkillManager`: now parses proper YAML frontmatter; old `get_instructions()` replaced by `get_body()`.
-- `ClawAgent._add_regional_attention`: guards `node.get("_meta") or {}` to prevent `KeyError`.
-- `SyncServer._clients`: protected with `threading.Lock` (was accessed unsafely across threads).
-- `ClawHarness`: removed `sys.path.insert` hack; all imports within the package.
 
-[Unreleased]: https://github.com/davidliuk/comfyclaw/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/davidliuk/comfyclaw/releases/tag/v0.1.0
+#### VAE output-slot bug in `_add_hires_fix` and `_add_inpaint_pass`
+- Previously the VAE input on every new `VAEDecode` node was hardcoded to slot
+  `0`, which is the `MODEL` output on `CheckpointLoaderSimple` (VAE is slot
+  `2`). The fix dynamically copies the `vae` connection from an existing
+  `VAEDecode` node in the graph, so both `CheckpointLoaderSimple` (slot 2) and
+  standalone `VAELoader` (slot 0) are handled correctly.
+
+### Tests
+
+- Added `TestRepairLoop` test class in `tests/test_harness.py` (6 new cases):
+  - `test_queue_error_triggers_agent_repair` — queue rejection wires through to
+    `plan_and_patch`.
+  - `test_repair_feedback_contains_error_message` — repair feedback includes the
+    verbatim error string.
+  - `test_repair_exhausted_records_error` — all repair attempts exhausted leaves
+    the error in memory and continues to the next iteration.
+  - `test_repair_success_produces_image` — a repair that fixes the workflow
+    produces an image and records it normally.
+  - `test_execution_error_triggers_repair` — execution-time errors also feed the
+    repair loop.
+  - `test_build_repair_feedback_content` — feedback string contains the error
+    message, instructions, and common-causes list.
+
+---
+
+## [0.1.0] — 2025-12-10
+
+Initial release. See commit `3342c7b` for full details.
+
+- Agent-driven ComfyUI workflow generation and evolution loop.
+- Claude Vision verifier with region-level analysis and iteration feedback.
+- LoRA injection, ControlNet, hires-fix, and inpaint-pass topology tools.
+- ComfyClaw-Sync custom node for live canvas updates in the ComfyUI web UI.
+- Built-in skills: `photorealistic`, `high-quality`, `hires-fix`,
+  `lora-enhancement`.

@@ -57,6 +57,12 @@ load skills you actually intend to use — each read consumes context.
 
 Decision heuristics
 -------------------
+  Workflow contains QwenImageModelLoader → read_skill("qwen-image-2512") FIRST.
+                                         Qwen has NO KSampler/ControlNet/LoRA —
+                                         all tuning is on RH_QwenImageGenerator.
+  Active model name contains "lcm"     → read_skill("dreamshaper8-lcm") FIRST, before
+                                         any sampler tuning — LCM needs different
+                                         steps/cfg/sampler than standard SD models.
   Flat / low-depth background          → read_skill("controlnet-control"), add depth
   Blurry edges / lost structure        → read_skill("controlnet-control"), add canny
   Wrong human pose / body              → read_skill("controlnet-control"), add pose
@@ -384,6 +390,7 @@ class ClawAgent:
         """
         user_content = self._build_user_message(
             original_prompt=original_prompt,
+            workflow_manager=workflow_manager,
             verifier_feedback=verifier_feedback,
             memory_summary=memory_summary,
             iteration=iteration,
@@ -683,6 +690,18 @@ class ClawAgent:
         hires_denoise = float(inputs.get("hires_denoise", 0.45))
         save_nid = str(inputs.get("save_image_node_id", ""))
 
+        # Resolve the correct VAE output slot by copying the connection from an
+        # existing VAEDecode node, so we handle CheckpointLoaderSimple (slot 2)
+        # and standalone VAELoader (slot 0) correctly.
+        existing_decode = next(
+            (nid for nid, n in wm.workflow.items() if n.get("class_type") == "VAEDecode"),
+            None,
+        )
+        if existing_decode:
+            vae_connection = list(wm.workflow[existing_decode]["inputs"].get("vae", [vae_nid, 0]))
+        else:
+            vae_connection = [vae_nid, 0]
+
         upscale_nid = wm.add_node(
             "LatentUpscaleBy", "Hires Upscale",
             samples=[base_ks_nid, 0],
@@ -694,7 +713,7 @@ class ClawAgent:
         base_inputs["steps"] = hires_steps
         base_inputs["denoise"] = hires_denoise
         hires_ks_nid = wm.add_node("KSampler", "KSampler (Hires)", **base_inputs)
-        decode_nid = wm.add_node("VAEDecode", "VAEDecode (Hires)", samples=[hires_ks_nid, 0], vae=[vae_nid, 0])
+        decode_nid = wm.add_node("VAEDecode", "VAEDecode (Hires)", samples=[hires_ks_nid, 0], vae=vae_connection)
 
         target = save_nid if save_nid in wm.workflow else next(
             (nid for nid, n in wm.workflow.items() if n.get("class_type") == "SaveImage"), None
@@ -713,7 +732,6 @@ class ClawAgent:
         prompt_text = inputs["inpaint_prompt"]
         denoise = float(inputs.get("denoise_strength", 0.55))
         base_ks_nid = str(inputs["base_ksampler_node_id"])
-        str(inputs["positive_node_id"])
         clip_nid = str(inputs["clip_node_id"])
         vae_nid = str(inputs["vae_node_id"])
         save_nid = str(inputs.get("save_image_node_id", ""))
@@ -726,8 +744,21 @@ class ClawAgent:
         base_inp["positive"] = [ip_pos_nid, 0]
         base_inp["latent_image"] = [base_ks_nid, 0]
         base_inp["denoise"] = denoise
+
+        # Copy VAE connection from an existing VAEDecode to handle
+        # CheckpointLoaderSimple (slot 2) vs VAELoader (slot 0) correctly.
+        existing_decode = next(
+            (nid for nid, n in wm.workflow.items() if n.get("class_type") == "VAEDecode"),
+            None,
+        )
+        vae_connection = (
+            list(wm.workflow[existing_decode]["inputs"].get("vae", [vae_nid, 0]))
+            if existing_decode
+            else [vae_nid, 0]
+        )
+
         ip_ks_nid = wm.add_node("KSampler", f"KSampler Inpaint ({region[:20]})", **base_inp)
-        ip_decode_nid = wm.add_node("VAEDecode", "VAEDecode Inpaint", samples=[ip_ks_nid, 0], vae=[vae_nid, 0])
+        ip_decode_nid = wm.add_node("VAEDecode", "VAEDecode Inpaint", samples=[ip_ks_nid, 0], vae=vae_connection)
 
         target = save_nid if save_nid in wm.workflow else next(
             (nid for nid, n in wm.workflow.items() if n.get("class_type") == "SaveImage"), None
@@ -792,19 +823,72 @@ class ClawAgent:
     def _build_user_message(
         self,
         original_prompt: str,
+        workflow_manager: WorkflowManager | None,
         verifier_feedback: str | None,
         memory_summary: str | None,
         iteration: int,
     ) -> str:
         parts = [f"## Image Prompt\n{original_prompt}", f"## Iteration\n{iteration}"]
 
+        # Detect the active checkpoint / UNET model from the workflow and surface
+        # it prominently so the agent can match it against model-specific skills
+        # without having to call inspect_workflow first.
+        active_model: str | None = None
+        if workflow_manager:
+            _loader_classes = ("CheckpointLoaderSimple", "CheckpointLoader", "UNETLoader")
+            _model_params = ("ckpt_name", "unet_name")
+            for node in workflow_manager.workflow.values():
+                if node.get("class_type") in _loader_classes:
+                    for param in _model_params:
+                        val = node.get("inputs", {}).get(param)
+                        if val and isinstance(val, str):
+                            active_model = val
+                            break
+                if active_model:
+                    break
+
+        # Detect Qwen-Image pipeline — either via custom pipeline nodes (old plugin)
+        # or via native ComfyUI UNETLoader with a qwen model filename.
+        _qwen_plugin_classes = {"QwenImageModelLoader", "RH_QwenImageGenerator"}
+        _qwen_unet_names = ("qwen_image",)
+
+        def _node_is_qwen_unet(node: dict) -> bool:
+            if node.get("class_type") != "UNETLoader":
+                return False
+            name = str(node.get("inputs", {}).get("unet_name", "")).lower()
+            return any(kw in name for kw in _qwen_unet_names)
+
+        is_qwen = workflow_manager is not None and any(
+            node.get("class_type") in _qwen_plugin_classes or _node_is_qwen_unet(node)
+            for node in workflow_manager.workflow.values()
+        )
+
+        if is_qwen:
+            parts.append("## Active Model\n`Qwen-Image-2512` (custom pipeline — no KSampler/ControlNet/LoRA)")
+        elif active_model:
+            parts.append(f"## Active Model\n`{active_model}`")
+
         # Hint at relevant skills (names only — full instructions loaded via read_skill)
+        # Also suggest model-specific skills based on the active checkpoint name.
         relevant = self.skill_manager.detect_relevant_skills(original_prompt)
+        if is_qwen:
+            if "qwen-image-2512" not in relevant:
+                relevant.insert(0, "qwen-image-2512")
+        elif active_model:
+            for skill_name in self.skill_manager.skill_names:
+                # Simple substring match: skill name keywords appear in model filename
+                skill_keywords = skill_name.replace("-", " ").split()
+                model_lower = active_model.lower()
+                if all(kw in model_lower for kw in skill_keywords if len(kw) > 2):
+                    if skill_name not in relevant:
+                        relevant.append(skill_name)
         if relevant:
-            hint = ", ".join(relevant)
+            hint = ", ".join(sorted(relevant))
             parts.append(
-                f"## Suggested Skills\nThese skills may be relevant to this prompt: {hint}\n"
-                "Call read_skill(<name>) to load the full instructions before applying."
+                f"## Suggested Skills\nThese skills may be relevant: {hint}\n"
+                "Call read_skill(<name>) to load full instructions before applying.\n"
+                "**If the active model is an LCM variant, read_skill(\"dreamshaper8-lcm\") FIRST.**\n"
+                "**If the workflow contains QwenImageModelLoader, read_skill(\"qwen-image-2512\") FIRST.**"
             )
 
         if verifier_feedback:
