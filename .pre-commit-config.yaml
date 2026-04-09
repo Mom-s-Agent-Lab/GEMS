@@ -66,9 +66,11 @@ repos:
     hooks:
       - id: pytest
         name: pytest (full suite)
-        entry: uv run pytest
+        # Sync the venv first so uv doesn't touch files *during* the test run
+        # (which would make pre-commit flag "files modified by hook").
+        # --frozen keeps uv from network-fetching; sync picks up local changes.
+        entry: bash -c "uv sync --group dev -q && uv run pytest -ra -q --tb=short"
         language: system
-        args: [-ra, -q, --tb=short]
         pass_filenames: false
         always_run: true
         stages: [pre-push]
