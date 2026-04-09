@@ -25,6 +25,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .agent import ClawAgent
+from .client import ComfyClient
+from .memory import ClawMemory
+from .sync_server import SyncServer
+from .verifier import ClawVerifier, VerifierResult
+from .workflow import WorkflowManager
+
 # Error messages that indicate a transient infrastructure fault in ComfyUI
 # (broken pipe from tqdm/progress-bar writing to a closed stderr, etc.).
 # These are NOT workflow logic errors — the agent should not attempt a repair;
@@ -33,13 +40,6 @@ _INFRA_ERROR_SIGNALS = (
     "[Errno 32] Broken pipe",
     "BrokenPipeError",
 )
-
-from .agent import ClawAgent
-from .client import ComfyClient
-from .memory import ClawMemory
-from .sync_server import SyncServer
-from .verifier import ClawVerifier, VerifierResult
-from .workflow import WorkflowManager
 
 log = logging.getLogger(__name__)
 
