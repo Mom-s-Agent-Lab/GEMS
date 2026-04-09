@@ -66,10 +66,10 @@ repos:
     hooks:
       - id: pytest
         name: pytest (full suite)
-        # Sync the venv first so uv doesn't touch files *during* the test run
-        # (which would make pre-commit flag "files modified by hook").
-        # --frozen keeps uv from network-fetching; sync picks up local changes.
-        entry: bash -c "uv sync --group dev -q && uv run pytest -ra -q --tb=short"
+        # --frozen: skip any sync/lock-update so no tracked files (uv.lock)
+        # are touched during the hook run, preventing false "files modified"
+        # failures. Run `uv sync --group dev` manually after dep changes.
+        entry: uv run --frozen pytest
         language: system
         pass_filenames: false
         always_run: true
