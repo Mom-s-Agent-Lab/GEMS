@@ -559,33 +559,31 @@ To get the API format from ComfyUI: **Workflow → Export (API)** in the menu.
 
 ## Development
 
-### Running the tests
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full developer guide, including
+pre-commit hooks, CI check mapping, and contribution workflow.
+
+### Quick-reference
 
 ```bash
-# All tests (fully offline — litellm.completion mocked)
-uv run pytest
+# Bootstrap
+uv sync --group dev
 
-# Verbose, specific module
-uv run pytest tests/test_workflow.py -v
-uv run pytest -k "topology_accumulation" -v
+# Install git hooks (run once per clone)
+uv run pre-commit install                       # commit-stage: ruff + file checks
+uv run pre-commit install --hook-type pre-push  # push-stage:   pytest + uv build
 
-# Stop on first failure
-uv run pytest -x
-```
+# Run all hooks manually
+uv run pre-commit run --all-files                        # commit stage
+uv run pre-commit run --all-files --hook-stage push      # push stage
 
-### Linting and formatting
+# Tests (all offline, ~30 s)
+uv run pytest -ra -q
 
-```bash
-uv run ruff check .           # lint
-uv run ruff check --fix .     # auto-fix
-uv run ruff format .          # format
-uv run mypy comfyclaw/        # type-check (optional)
-```
+# Lint / format
+uv run ruff check --fix . && uv run ruff format .
 
-### Building a wheel
-
-```bash
-uv build                      # produces dist/comfyclaw-*.whl
+# Build wheel
+uv build
 ```
 
 ---
