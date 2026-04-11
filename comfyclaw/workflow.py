@@ -331,6 +331,73 @@ class WorkflowManager:
             data = data["prompt"]
         return cls(data)
 
+    # Known output slot counts for common node types.
+    _OUTPUT_SLOTS: dict[str, int] = {
+        "CheckpointLoaderSimple": 3,
+        "CheckpointLoader": 3,
+        "UNETLoader": 1,
+        "CLIPLoader": 1,
+        "DualCLIPLoader": 1,
+        "VAELoader": 1,
+        "LoraLoader": 2,
+        "LoraLoaderModelOnly": 1,
+        "CLIPTextEncode": 1,
+        "CLIPTextEncodeSDXL": 1,
+        "EmptyLatentImage": 1,
+        "EmptySD3LatentImage": 1,
+        "KSampler": 1,
+        "KSamplerAdvanced": 1,
+        "VAEDecode": 1,
+        "VAEEncode": 1,
+        "ModelSamplingAuraFlow": 1,
+        "FluxGuidance": 1,
+        "ControlNetLoader": 1,
+        "ControlNetApplyAdvanced": 2,
+        "LatentUpscaleBy": 1,
+        "LatentUpscale": 1,
+        "SaveImage": 0,
+        "PreviewImage": 0,
+    }
+
+    @classmethod
+    def validate(cls, workflow: dict) -> list[str]:
+        """Check graph connectivity and return a list of error strings (empty = valid)."""
+        errors: list[str] = []
+        if not workflow:
+            errors.append("Workflow is empty — no nodes at all.")
+            return errors
+
+        has_output = any(
+            n.get("class_type") in ("SaveImage", "PreviewImage")
+            for n in workflow.values()
+        )
+        if not has_output:
+            errors.append(
+                "No output node (SaveImage or PreviewImage). "
+                "ComfyUI will reject with 'prompt_no_outputs'."
+            )
+
+        for nid, node in workflow.items():
+            ct = node.get("class_type", "?")
+            for inp_name, val in node.get("inputs", {}).items():
+                if not (isinstance(val, list) and len(val) == 2 and isinstance(val[0], str)):
+                    continue
+                src_id, src_slot = val[0], val[1]
+                if src_id not in workflow:
+                    errors.append(
+                        f"[{nid}] {ct}.{inp_name} → node {src_id} does NOT exist."
+                    )
+                    continue
+                src_ct = workflow[src_id].get("class_type", "?")
+                max_slots = WorkflowManager._OUTPUT_SLOTS.get(src_ct)
+                if max_slots is not None and src_slot >= max_slots:
+                    errors.append(
+                        f"[{nid}] {ct}.{inp_name} → node {src_id} ({src_ct}) "
+                        f"slot {src_slot} is out of range (max {max_slots - 1})."
+                    )
+
+        return errors
+
     @staticmethod
     def summarize(workflow: dict) -> str:
         """

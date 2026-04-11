@@ -20,6 +20,37 @@ This skill teaches you to build complete, working ComfyUI workflows using
 `add_node` and `connect_nodes`. **Every recipe below is tested and produces
 a valid, queueable graph.**
 
+## Output Slot Reference (CRITICAL — memorize these)
+
+When wiring nodes via `add_node(... input_name=[src_node_id, OUTPUT_SLOT])`,
+you must use the correct output slot index. Wrong slot = ComfyUI 400 error.
+
+| Node class | Slot 0 | Slot 1 | Slot 2 |
+|---|---|---|---|
+| **CheckpointLoaderSimple** | MODEL | CLIP | VAE |
+| **UNETLoader** | MODEL | — | — |
+| **CLIPLoader** | CLIP | — | — |
+| **DualCLIPLoader** | CLIP | — | — |
+| **VAELoader** | VAE | — | — |
+| **LoraLoader** | MODEL | CLIP | — |
+| **LoraLoaderModelOnly** | MODEL | — | — |
+| **CLIPTextEncode** | CONDITIONING | — | — |
+| **EmptyLatentImage** | LATENT | — | — |
+| **EmptySD3LatentImage** | LATENT | — | — |
+| **KSampler** | LATENT | — | — |
+| **VAEDecode** | IMAGE | — | — |
+| **ModelSamplingAuraFlow** | MODEL | — | — |
+| **FluxGuidance** | CONDITIONING | — | — |
+| **ControlNetLoader** | CONTROL_NET | — | — |
+| **ControlNetApplyAdvanced** | positive (CONDITIONING) | negative (CONDITIONING) | — |
+| **LatentUpscaleBy** | LATENT | — | — |
+
+**Common wiring mistakes to avoid:**
+- CheckpointLoaderSimple: CLIP is slot **1** (not 0), VAE is slot **2** (not 1)
+- UNETLoader: only has slot **0** (MODEL) — no CLIP or VAE outputs
+- KSampler output is LATENT at slot **0** — feed this to VAEDecode's `samples` input
+- VAEDecode output is IMAGE at slot **0** — feed this to SaveImage's `images` input
+
 ## Step 0 — Detect the Architecture
 
 Before building anything, discover what models the server has:
@@ -255,46 +286,61 @@ n9 = add_node("SaveImage", "Save Image",
 **Read skill "qwen-image-2512" for detailed guidance** — it covers this model's
 unique architecture, Lightning LoRA mode, resolution buckets, and prompt style.
 
-Quick construction reference:
+Quick construction reference (use EXACT filenames from query_available_models):
 
 ```python
+# Loaders — each outputs ONE type on slot 0
 n1 = add_node("UNETLoader", "Load Qwen UNET",
-              unet_name="qwen_image_2512_fp8_e4m3fn.safetensors",
+              unet_name="<from diffusion_models query>",  # → slot 0: MODEL
               weight_dtype="fp8_e4m3fn")
 n2 = add_node("CLIPLoader", "Load CLIP",
-              clip_name="qwen_2.5_vl_7b_fp8_scaled.safetensors",
+              clip_name="<from clip query>",               # → slot 0: CLIP
               type="qwen_image", device="default")
 n3 = add_node("VAELoader", "Load VAE",
-              vae_name="qwen_image_vae.safetensors")
+              vae_name="<from vae query>")                 # → slot 0: VAE
 
 # Optional Lightning LoRA for 4-step fast inference
 n_lora = add_node("LoraLoaderModelOnly", "Lightning LoRA",
-                  model=[n1, 0],
-                  lora_name="Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors",
+                  model=[n1, 0],                           # ← MODEL from UNETLoader
+                  lora_name="<from loras query>",          # → slot 0: MODEL
                   strength_model=1.0)
 
 n4 = add_node("ModelSamplingAuraFlow", "AuraFlow Sampling",
-              model=[n_lora, 0], shift=3.1)
+              model=[n_lora, 0],                           # ← MODEL from LoRA
+              shift=3.1)                                   # → slot 0: MODEL
 
+# Prompts — CLIPTextEncode outputs CONDITIONING on slot 0
 n5 = add_node("CLIPTextEncode", "Positive Prompt",
-              clip=[n2, 0], text="<natural language prompt>")
+              clip=[n2, 0],                                # ← CLIP from CLIPLoader
+              text="<natural language prompt>")            # → slot 0: CONDITIONING
 n6 = add_node("CLIPTextEncode", "Negative Prompt",
-              clip=[n2, 0], text="低分辨率，低画质，肢体畸形，画面具有AI感")
+              clip=[n2, 0],                                # ← CLIP from CLIPLoader
+              text="低分辨率，低画质，肢体畸形，画面具有AI感")  # → slot 0: CONDITIONING
 
+# Latent
 n7 = add_node("EmptySD3LatentImage", "Empty Latent",
-              width=1328, height=1328, batch_size=1)
+              width=1328, height=1328, batch_size=1)       # → slot 0: LATENT
 
+# Sampler — all inputs wired, output is LATENT on slot 0
 n8 = add_node("KSampler", "KSampler",
-              model=[n4, 0], positive=[n5, 0], negative=[n6, 0],
-              latent_image=[n7, 0],
+              model=[n4, 0],                               # ← MODEL from AuraFlow
+              positive=[n5, 0],                            # ← CONDITIONING from pos prompt
+              negative=[n6, 0],                            # ← CONDITIONING from neg prompt
+              latent_image=[n7, 0],                        # ← LATENT from empty latent
               seed=42, steps=4, cfg=1.0,
-              sampler_name="euler", scheduler="simple", denoise=1.0)
+              sampler_name="euler", scheduler="simple",
+              denoise=1.0)                                 # → slot 0: LATENT
 
+# Decode — samples MUST come from KSampler slot 0, vae from VAELoader slot 0
 n9 = add_node("VAEDecode", "VAE Decode",
-              samples=[n8, 0], vae=[n3, 0])
+              samples=[n8, 0],                             # ← LATENT from KSampler
+              vae=[n3, 0])                                 # ← VAE from VAELoader
+                                                           # → slot 0: IMAGE
 
+# Save — images MUST come from VAEDecode slot 0
 n10 = add_node("SaveImage", "Save Image",
-               images=[n9, 0], filename_prefix="ComfyClaw")
+               images=[n9, 0],                             # ← IMAGE from VAEDecode
+               filename_prefix="ComfyClaw")
 ```
 
 ---

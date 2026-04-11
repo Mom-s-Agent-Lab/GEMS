@@ -115,8 +115,24 @@ class TestDispatch:
 
     def test_finalize_stops_loop(self, wm: WorkflowManager) -> None:
         agent = _make_agent()
+        wm.add_node("SaveImage", "Save", images=["3", 0])
         result, stop = agent._dispatch("finalize_workflow", {"rationale": "All done."}, wm)
         assert stop is True
+
+    def test_finalize_blocks_on_invalid_workflow(self, wm: WorkflowManager) -> None:
+        agent = _make_agent()
+        result, stop = agent._dispatch("finalize_workflow", {"rationale": "done"}, wm)
+        assert stop is False
+        assert "⚠️" in result
+
+    def test_validate_workflow(self, wm: WorkflowManager) -> None:
+        agent = _make_agent()
+        result, stop = agent._dispatch("validate_workflow", {}, wm)
+        assert stop is False
+        assert "SaveImage" in result
+        wm.add_node("SaveImage", "Save", images=["3", 0])
+        result2, _ = agent._dispatch("validate_workflow", {}, wm)
+        assert "✅" in result2
 
     def test_unknown_tool_returns_error(self, wm: WorkflowManager) -> None:
         agent = _make_agent()
@@ -265,6 +281,7 @@ class TestQueryModels:
 
 class TestPlanAndPatch:
     def test_finalize_returns_rationale(self, wm: WorkflowManager) -> None:
+        wm.add_node("SaveImage", "Save", images=["3", 0])
         strategy_resp = _litellm_tool_response(
             _litellm_tool_call(
                 "report_evolution_strategy",

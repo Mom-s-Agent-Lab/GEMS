@@ -56,7 +56,8 @@ Iteration strategy
    d. Build the full pipeline node-by-node using add_node, following the matching recipe.
    e. Use ONLY exact filenames from query results.
    f. Set detailed prompts on the CLIPTextEncode nodes.
-   g. Call finalize_workflow.
+   g. Call validate_workflow to catch wiring errors before submitting.
+   h. Call finalize_workflow (it auto-validates and blocks if errors remain).
 4. **If the workflow already has nodes**, follow the evolution strategy:
    a. Call set_prompt — craft a detailed, professional positive prompt AND a strong
       negative prompt based on the user's goal (see "Prompt engineering" below).
@@ -66,7 +67,8 @@ Iteration strategy
    c. Call query_available_models BEFORE adding any LoRA or ControlNet node.
    d. Apply structural upgrades (LoRA / ControlNet / regional / hires / inpaint).
    e. Tune sampler parameters (steps, CFG, seed) as needed.
-   f. Call finalize_workflow when done.
+   f. Call validate_workflow to catch wiring errors.
+   g. Call finalize_workflow when done (it auto-validates).
 
 Prompt engineering (step 3)
 ----------------------------
@@ -409,8 +411,17 @@ _TOOLS: list[dict] = [
         },
     ),
     _tool(
+        "validate_workflow",
+        (
+            "Check the workflow graph for common errors BEFORE finalizing. "
+            "Returns a list of issues (dangling refs, wrong slot indices, missing outputs). "
+            "Call this after building or repairing the workflow to catch mistakes early."
+        ),
+        {"type": "object", "properties": {}, "required": []},
+    ),
+    _tool(
         "finalize_workflow",
-        "Signal that all modifications are complete.",
+        "Signal that all modifications are complete. Call validate_workflow first to catch errors.",
         {
             "type": "object",
             "properties": {"rationale": {"type": "string"}},
@@ -667,7 +678,26 @@ class ClawAgent:
                     )
                     return "Strategy noted.", False
 
+                case "validate_workflow":
+                    errs = WorkflowManager.validate(wm.workflow)
+                    if errs:
+                        msg = "⚠️ Validation found issues:\n" + "\n".join(f"  • {e}" for e in errs)
+                        msg += "\n\nFix these before calling finalize_workflow."
+                        print(f"[ClawAgent] ⚠️ Validation: {len(errs)} issue(s)")
+                        return msg, False
+                    node_count = len(wm.workflow)
+                    print(f"[ClawAgent] ✅ Validation passed ({node_count} nodes)")
+                    return f"✅ Workflow is valid ({node_count} nodes, no issues found).", False
+
                 case "finalize_workflow":
+                    errs = WorkflowManager.validate(wm.workflow)
+                    if errs:
+                        msg = (
+                            "⚠️ Auto-validation found issues — fix before finalizing:\n"
+                            + "\n".join(f"  • {e}" for e in errs)
+                        )
+                        print(f"[ClawAgent] ⚠️ Finalize blocked: {len(errs)} validation error(s)")
+                        return msg, False
                     print(f"[ClawAgent] 🎯 {inputs.get('rationale', '')}")
                     return "Workflow finalized.", True
 
