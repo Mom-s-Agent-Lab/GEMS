@@ -707,6 +707,7 @@ class ClawAgent:
             strength_model=sm,
             strength_clip=sc,
         )
+        self._notify(wm)
 
         rewired_model, rewired_clip = [], []
         for nid, node in wm.workflow.items():
@@ -742,11 +743,14 @@ class ClawAgent:
         cn_loader_nid = wm.add_node(
             "ControlNetLoader", f"CN: {cn_name[:25]}", control_net_name=cn_name
         )
+        self._notify(wm)
 
         preproc_output = None
+        preproc_nid = None
         if preproc_cls and image_nid:
             preproc_nid = wm.add_node(preproc_cls, preproc_cls, image=[image_nid, 0])
             preproc_output = [preproc_nid, 0]
+            self._notify(wm)
         elif image_nid:
             preproc_output = [image_nid, 0]
 
@@ -762,6 +766,7 @@ class ClawAgent:
             apply_inputs["image"] = preproc_output
 
         apply_nid = wm.add_node("ControlNetApplyAdvanced", "CN Apply", **apply_inputs)
+        self._notify(wm)
 
         for nid, node in wm.workflow.items():
             if node.get("class_type") == "KSampler":
@@ -792,18 +797,20 @@ class ClawAgent:
         bg_prompt = inputs["background_prompt"]
         fg_weight = float(inputs.get("foreground_weight", 1.3))
 
-        # Guard: update existing positive node's meta if it exists
         if pos_nid in wm.workflow:
             meta = wm.workflow[pos_nid].setdefault("_meta", {})
             meta["title"] = "Regional Prompt (BREAK)"
             wm.workflow[pos_nid]["inputs"]["text"] = f"{fg_prompt} BREAK {bg_prompt}"
+            self._notify(wm)
 
         fg_nid = wm.add_node(
             "CLIPTextEncode", "Foreground Prompt", clip=[clip_nid, 0], text=fg_prompt
         )
+        self._notify(wm)
         bg_nid = wm.add_node(
             "CLIPTextEncode", "Background Prompt", clip=[clip_nid, 0], text=bg_prompt
         )
+        self._notify(wm)
         avg_nid = wm.add_node(
             "ConditioningAverage",
             "FG Weight",
@@ -811,12 +818,15 @@ class ClawAgent:
             conditioning_from=[pos_nid, 0],
             conditioning_to_strength=fg_weight,
         )
+        self._notify(wm)
         combine_nid = wm.add_node(
             "ConditioningCombine",
             "Regional Combine",
             conditioning_1=[avg_nid, 0],
             conditioning_2=[bg_nid, 0],
         )
+        self._notify(wm)
+
         for _nid, node in wm.workflow.items():
             if node.get("class_type") == "KSampler":
                 node["inputs"]["positive"] = [combine_nid, 0]
@@ -835,9 +845,6 @@ class ClawAgent:
         hires_denoise = float(inputs.get("hires_denoise", 0.45))
         save_nid = str(inputs.get("save_image_node_id", ""))
 
-        # Resolve the correct VAE output slot by copying the connection from an
-        # existing VAEDecode node, so we handle CheckpointLoaderSimple (slot 2)
-        # and standalone VAELoader (slot 0) correctly.
         existing_decode = next(
             (nid for nid, n in wm.workflow.items() if n.get("class_type") == "VAEDecode"),
             None,
@@ -854,14 +861,19 @@ class ClawAgent:
             upscale_method=method,
             scale_by=scale_by,
         )
+        self._notify(wm)
+
         base_inputs = copy.deepcopy(wm.workflow.get(base_ks_nid, {}).get("inputs", {}))
         base_inputs["latent_image"] = [upscale_nid, 0]
         base_inputs["steps"] = hires_steps
         base_inputs["denoise"] = hires_denoise
         hires_ks_nid = wm.add_node("KSampler", "KSampler (Hires)", **base_inputs)
+        self._notify(wm)
+
         decode_nid = wm.add_node(
             "VAEDecode", "VAEDecode (Hires)", samples=[hires_ks_nid, 0], vae=vae_connection
         )
+        self._notify(wm)
 
         target = (
             save_nid
@@ -894,13 +906,13 @@ class ClawAgent:
             clip=[clip_nid, 0],
             text=prompt_text,
         )
+        self._notify(wm)
+
         base_inp = copy.deepcopy(wm.workflow.get(base_ks_nid, {}).get("inputs", {}))
         base_inp["positive"] = [ip_pos_nid, 0]
         base_inp["latent_image"] = [base_ks_nid, 0]
         base_inp["denoise"] = denoise
 
-        # Copy VAE connection from an existing VAEDecode to handle
-        # CheckpointLoaderSimple (slot 2) vs VAELoader (slot 0) correctly.
         existing_decode = next(
             (nid for nid, n in wm.workflow.items() if n.get("class_type") == "VAEDecode"),
             None,
@@ -912,9 +924,12 @@ class ClawAgent:
         )
 
         ip_ks_nid = wm.add_node("KSampler", f"KSampler Inpaint ({region[:20]})", **base_inp)
+        self._notify(wm)
+
         ip_decode_nid = wm.add_node(
             "VAEDecode", "VAEDecode Inpaint", samples=[ip_ks_nid, 0], vae=vae_connection
         )
+        self._notify(wm)
 
         target = (
             save_nid

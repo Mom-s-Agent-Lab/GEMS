@@ -1,15 +1,21 @@
 /**
- * ComfyClaw Sync Extension  v1.1
+ * ComfyClaw Sync Extension  v2.0
  *
  * Connects to the ComfyClaw Python sync server (ws://127.0.0.1:8765 by default)
  * and reloads the ComfyUI canvas in real time whenever the agent modifies the
  * workflow topology.
  *
- * Protocol — the Python SyncServer sends:
- *   { "type": "workflow_update", "workflow": { "<nodeId>": { class_type, inputs, ... }, ... } }
+ * Protocol — the Python SyncServer sends two message types:
+ *
+ *   Full snapshot (initial load / reconnect):
+ *   { "type": "workflow_update", "workflow": { "<nodeId>": { class_type, inputs, … }, … } }
+ *
+ *   Incremental diff (subsequent mutations):
+ *   { "type": "workflow_diff", "ops": [ {op, id, data?}, … ], "full": {…} }
  *
  * Configuration (persisted in localStorage):
  *   localStorage.setItem('comfyclaw_ws_url', 'ws://127.0.0.1:8765');
+ *   localStorage.setItem('comfyclaw_op_delay', '400');   // ms between ops
  *
  * Status badge:
  *   🔄 connecting  |  🟢 live  |  ✨ updated (flashes 2 s)  |  🔴 disconnected
@@ -17,9 +23,30 @@
 
 import { app } from "../../scripts/app.js";
 
-const DEFAULT_WS_URL       = `ws://${window.location.hostname}:8765`;
-const RECONNECT_DELAY_MS   = 3000;
+const DEFAULT_WS_URL         = `ws://${window.location.hostname}:8765`;
+const RECONNECT_DELAY_MS     = 3000;
 const MAX_RECONNECT_ATTEMPTS = 20;
+const DEFAULT_OP_DELAY_MS    = 400;
+
+const NODE_W = 220;
+const NODE_H = 180;
+const GAP_X  = 60;
+const GAP_Y  = 40;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function getOpDelay() {
+  const stored = localStorage.getItem("comfyclaw_op_delay");
+  if (stored !== null) {
+    const n = parseInt(stored, 10);
+    if (!isNaN(n) && n >= 0) return n;
+  }
+  return DEFAULT_OP_DELAY_MS;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Status badge
@@ -78,13 +105,9 @@ function promptConfig() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Workflow loading
+// API-format detection & conversion (for full-reload fallback)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Returns true if ``data`` looks like a ComfyUI API-format workflow
- * (flat object keyed by numeric string node IDs, each with a class_type).
- */
 function isApiFormat(data) {
   if (typeof data !== "object" || data === null || Array.isArray(data)) return false;
   const keys = Object.keys(data);
@@ -92,21 +115,15 @@ function isApiFormat(data) {
   return keys.every(k => /^\d+$/.test(k) && data[k] && data[k].class_type);
 }
 
-/**
- * Convert API-format workflow → minimal LiteGraph graph object.
- * Node positions are arranged left-to-right in columns of 5.
- */
 function apiToLitegraph(apiWf) {
   const nodes  = [];
   const links  = [];
   let linkCounter = 0;
-  const linkMap   = {};   // "srcId:srcIdx" → linkId
+  const linkMap   = {};
 
-  const ids   = Object.keys(apiWf).sort((a, b) => parseInt(a) - parseInt(b));
-  const COLS  = 5;
-  const NODE_W = 220, NODE_H = 180, GAP_X = 60, GAP_Y = 40;
+  const ids  = Object.keys(apiWf).sort((a, b) => parseInt(a) - parseInt(b));
+  const COLS = 5;
 
-  // Assign grid positions
   const posMap = {};
   ids.forEach((nid, idx) => {
     const col = idx % COLS;
@@ -121,7 +138,6 @@ function apiToLitegraph(apiWf) {
 
     for (const [key, val] of Object.entries(apiNode.inputs || {})) {
       if (Array.isArray(val) && val.length === 2 && typeof val[0] === "string") {
-        // Link reference: [srcNodeId, srcOutputIdx]
         const [srcId, srcIdx] = val;
         const linkKey = `${srcId}:${srcIdx}`;
         let lid;
@@ -130,7 +146,6 @@ function apiToLitegraph(apiWf) {
         } else {
           lid = linkCounter++;
           linkMap[linkKey] = lid;
-          // LiteGraph link: [link_id, src_node_id, src_slot, dst_node_id, dst_slot, type]
           links.push([lid, parseInt(srcId), srcIdx, parseInt(nid), inputs_meta.length, "*"]);
         }
         inputs_meta.push({ name: key, type: "*", link: lid });
@@ -167,20 +182,18 @@ function apiToLitegraph(apiWf) {
   };
 }
 
-/**
- * Load ``data`` (API or LiteGraph format) into the ComfyUI canvas.
- * Tries three methods in order for broad version compatibility.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// Full workflow loading (used for initial load / reconnect)
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function loadWorkflowIntoCanvas(data) {
   try {
-    // Method 1: ComfyUI ≥ 0.2 — loadApiJson accepts API format natively
     if (isApiFormat(data) && typeof app.loadApiJson === "function") {
       await app.loadApiJson(data);
       console.log("[ComfyClaw] Loaded via app.loadApiJson");
       return true;
     }
 
-    // Method 2: loadGraphData — expects LiteGraph / UI format
     const graphData = isApiFormat(data) ? apiToLitegraph(data) : data;
     if (typeof app.loadGraphData === "function") {
       await app.loadGraphData(graphData);
@@ -188,7 +201,6 @@ async function loadWorkflowIntoCanvas(data) {
       return true;
     }
 
-    // Method 3: low-level LiteGraph configure
     if (app.graph && typeof app.graph.configure === "function") {
       app.graph.configure(isApiFormat(data) ? apiToLitegraph(data) : data);
       app.graph.setDirtyCanvas?.(true, true);
@@ -205,6 +217,84 @@ async function loadWorkflowIntoCanvas(data) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Incremental diff application — node-by-node canvas updates
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Accumulated API-format workflow the client knows about.
+ * Updated on every op so we can reload the full graph at each step.
+ */
+let _currentApiWorkflow = {};
+
+/**
+ * Temporarily highlight a node using LiteGraph's native color system.
+ */
+function highlightNode(nodeId, durationMs = 1500) {
+  const lgNode = app.graph?.getNodeById(parseInt(nodeId));
+  if (!lgNode) return;
+
+  const origColor   = lgNode.color;
+  const origBgcolor = lgNode.bgcolor;
+
+  lgNode.color   = "#4a9eff";
+  lgNode.bgcolor = "#1a3a5a";
+  app.graph?.setDirtyCanvas?.(true, true);
+
+  setTimeout(() => {
+    lgNode.color   = origColor;
+    lgNode.bgcolor = origBgcolor;
+    app.graph?.setDirtyCanvas?.(true, true);
+  }, durationMs);
+}
+
+/**
+ * Apply a single diff op:
+ *  1. Update ``_currentApiWorkflow`` (the accumulated state).
+ *  2. Reload the full graph via ComfyUI's native loader (handles layout).
+ *  3. Highlight the affected node so the user can see what changed.
+ */
+async function applyOp(op) {
+  switch (op.op) {
+    case "add_node":
+      _currentApiWorkflow[op.id] = op.data;
+      await loadWorkflowIntoCanvas(_currentApiWorkflow);
+      highlightNode(op.id);
+      console.log(`[ComfyClaw] +node ${op.id} (${op.data.class_type})`);
+      break;
+
+    case "remove_node":
+      delete _currentApiWorkflow[op.id];
+      await loadWorkflowIntoCanvas(_currentApiWorkflow);
+      console.log(`[ComfyClaw] -node ${op.id}`);
+      break;
+
+    case "update_node":
+      _currentApiWorkflow[op.id] = op.data;
+      await loadWorkflowIntoCanvas(_currentApiWorkflow);
+      highlightNode(op.id, 800);
+      console.log(`[ComfyClaw] ~node ${op.id} (updated)`);
+      break;
+
+    default:
+      console.warn(`[ComfyClaw] Unknown op: ${op.op}`);
+  }
+}
+
+/**
+ * Process an array of diff ops sequentially with a delay between each
+ * ``add_node`` op for a smooth visual build-up effect.
+ */
+async function applyDiffOps(ops) {
+  const delayMs = getOpDelay();
+  for (let i = 0; i < ops.length; i++) {
+    await applyOp(ops[i]);
+    if (delayMs > 0 && ops[i].op === "add_node" && i < ops.length - 1) {
+      await sleep(delayMs);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // WebSocket client with auto-reconnect
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -213,6 +303,8 @@ class SyncClient {
     this.ws = null;
     this.reconnectAttempts = 0;
     this.destroyed = false;
+    this._processing = false;
+    this._queue = [];
   }
 
   connect() {
@@ -232,25 +324,17 @@ class SyncClient {
       setStatus("connected");
     };
 
-    this.ws.onmessage = async (event) => {
+    this.ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        // Python SyncServer sends: { type: "workflow_update", workflow: {...} }
-        if (msg.type === "workflow_update" && msg.workflow) {
-          const nodeCount = Object.keys(msg.workflow).length;
-          const ok = await loadWorkflowIntoCanvas(msg.workflow);
-          if (ok) {
-            setStatus("updated", `${nodeCount} nodes`);
-          }
-        }
+        this._queue.push(msg);
+        this._processQueue();
       } catch (err) {
         console.error("[ComfyClaw] Message parse error:", err);
       }
     };
 
-    this.ws.onerror = () => {
-      // Suppress noisy browser error — reconnect logic handles it
-    };
+    this.ws.onerror = () => {};
 
     this.ws.onclose = () => {
       if (!this.destroyed) {
@@ -258,6 +342,41 @@ class SyncClient {
         this._scheduleReconnect();
       }
     };
+  }
+
+  async _processQueue() {
+    if (this._processing) return;
+    this._processing = true;
+    try {
+      while (this._queue.length > 0) {
+        const msg = this._queue.shift();
+        await this._handleMessage(msg);
+      }
+    } finally {
+      this._processing = false;
+    }
+  }
+
+  async _handleMessage(msg) {
+    if (msg.type === "workflow_update" && msg.workflow) {
+      _currentApiWorkflow = JSON.parse(JSON.stringify(msg.workflow));
+      const nodeCount = Object.keys(msg.workflow).length;
+      const ok = await loadWorkflowIntoCanvas(msg.workflow);
+      if (ok) {
+        setStatus("updated", `${nodeCount} nodes`);
+      }
+    } else if (msg.type === "workflow_diff" && Array.isArray(msg.ops)) {
+      const addCount = msg.ops.filter(o => o.op === "add_node").length;
+      const rmCount  = msg.ops.filter(o => o.op === "remove_node").length;
+      const updCount = msg.ops.filter(o => o.op === "update_node").length;
+      await applyDiffOps(msg.ops);
+      const total = Object.keys(_currentApiWorkflow).length;
+      const parts = [];
+      if (addCount)  parts.push(`+${addCount}`);
+      if (rmCount)   parts.push(`-${rmCount}`);
+      if (updCount)  parts.push(`~${updCount}`);
+      setStatus("updated", `${total} nodes (${parts.join(", ")})`);
+    }
   }
 
   _scheduleReconnect() {
@@ -285,9 +404,8 @@ app.registerExtension({
   name: "ComfyClaw.SyncBridge",
 
   async setup() {
-    console.log("[ComfyClaw] Extension loaded — ComfyClaw Sync Bridge v1.1");
+    console.log("[ComfyClaw] Extension loaded — ComfyClaw Sync Bridge v2.0");
     statusEl = createStatusBadge();
-    // Small delay so the rest of ComfyUI finishes initialising
     setTimeout(() => new SyncClient().connect(), 500);
   },
 });

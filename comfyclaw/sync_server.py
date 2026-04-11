@@ -5,11 +5,18 @@ ComfyClaw-Sync ComfyUI extension).
 
 Runs in a background daemon thread using its own asyncio event loop so it
 never blocks the main harness loop.
+
+Supports two message types:
+  - ``workflow_update``  — full workflow snapshot (used on reconnect /
+    initial load).
+  - ``workflow_diff``    — incremental ops (add_node, remove_node,
+    update_node) computed by diffing against the previous broadcast.
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import threading
@@ -26,6 +33,41 @@ except ImportError:
     _WS_AVAILABLE = False
 
 
+# ------------------------------------------------------------------
+# Diff helpers
+# ------------------------------------------------------------------
+
+
+def diff_workflows(old: dict, new: dict) -> list[dict]:
+    """
+    Compare two API-format workflow dicts and return a list of ops.
+
+    Each op is one of::
+
+        {"op": "add_node",    "id": "<node_id>", "data": {class_type, inputs, …}}
+        {"op": "remove_node", "id": "<node_id>"}
+        {"op": "update_node", "id": "<node_id>", "data": {class_type, inputs, …}}
+
+    The full node ``data`` is included in ``update_node`` so the client can
+    replace its state wholesale rather than patching individual keys.
+    """
+    ops: list[dict] = []
+    old_keys = set(old)
+    new_keys = set(new)
+
+    for nid in sorted(new_keys - old_keys, key=lambda k: int(k)):
+        ops.append({"op": "add_node", "id": nid, "data": new[nid]})
+
+    for nid in sorted(old_keys - new_keys, key=lambda k: int(k)):
+        ops.append({"op": "remove_node", "id": nid})
+
+    for nid in sorted(old_keys & new_keys, key=lambda k: int(k)):
+        if old[nid] != new[nid]:
+            ops.append({"op": "update_node", "id": nid, "data": new[nid]})
+
+    return ops
+
+
 class SyncServer:
     """
     Parameters
@@ -38,9 +80,11 @@ class SyncServer:
         self.port = port
         self.host = host
 
-        # Shared state protected by a lock (asyncio loop + main thread both access it)
         self._clients: set[Any] = set()
         self._clients_lock = threading.Lock()
+
+        self._last_workflow: dict | None = None
+        self._wf_lock = threading.Lock()
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -78,24 +122,56 @@ class SyncServer:
     def is_running(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
 
+    def reset(self) -> None:
+        """Clear remembered workflow state (e.g. between harness runs)."""
+        with self._wf_lock:
+            self._last_workflow = None
+
     # ------------------------------------------------------------------
     # Broadcast
     # ------------------------------------------------------------------
 
     def broadcast(self, workflow: dict) -> None:
         """
-        Send a workflow snapshot to all connected clients.
+        Send an incremental diff to all connected clients.
 
-        Safe to call from any thread.  No-op if no clients are connected or
-        the server is not running.
+        On the first call (or after ``reset()``) a full ``workflow_update``
+        is sent.  Subsequent calls compute the diff against the previous
+        snapshot and send a ``workflow_diff`` with granular ops.
+
+        Safe to call from any thread.
         """
         if not self._loop or not self.is_running():
+            with self._wf_lock:
+                self._last_workflow = copy.deepcopy(workflow)
             return
+
         with self._clients_lock:
             current_clients = set(self._clients)
         if not current_clients:
+            with self._wf_lock:
+                self._last_workflow = copy.deepcopy(workflow)
             return
-        payload = json.dumps({"type": "workflow_update", "workflow": workflow})
+
+        with self._wf_lock:
+            prev = self._last_workflow
+            if prev is None:
+                payload = json.dumps({
+                    "type": "workflow_update",
+                    "workflow": workflow,
+                })
+            else:
+                ops = diff_workflows(prev, workflow)
+                if not ops:
+                    self._last_workflow = copy.deepcopy(workflow)
+                    return
+                payload = json.dumps({
+                    "type": "workflow_diff",
+                    "ops": ops,
+                    "full": workflow,
+                })
+            self._last_workflow = copy.deepcopy(workflow)
+
         asyncio.run_coroutine_threadsafe(
             self._async_broadcast(payload, current_clients), self._loop
         )
@@ -131,6 +207,20 @@ class SyncServer:
         with self._clients_lock:
             self._clients.add(websocket)
         log.debug("[SyncServer] Client connected (%d total)", len(self._clients))
+
+        # Bootstrap: send the full current workflow so the client starts
+        # from the right state before receiving subsequent diffs.
+        with self._wf_lock:
+            snapshot = copy.deepcopy(self._last_workflow) if self._last_workflow else None
+        if snapshot is not None:
+            try:
+                await websocket.send(json.dumps({
+                    "type": "workflow_update",
+                    "workflow": snapshot,
+                }))
+            except Exception:
+                pass
+
         try:
             async for _ in websocket:
                 pass  # we only push; ignore any client messages
