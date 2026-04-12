@@ -210,8 +210,15 @@ def _install_node(comfyui_dir: Path) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
+
+
+def _is_local(host: str) -> bool:
+    return host in _LOCAL_HOSTS
+
+
 def _ensure_comfyui_running(addr: str) -> str:
-    """Ping ComfyUI; try to open the Desktop app if not responding."""
+    """Ping ComfyUI; auto-discover port or launch Desktop app if local."""
     from .client import ComfyClient
 
     client = ComfyClient(addr)
@@ -219,8 +226,30 @@ def _ensure_comfyui_running(addr: str) -> str:
         print(f"[cli] ComfyUI is UP at http://{addr}")
         return addr
 
-    print("[cli] ComfyUI not running — attempting to open the app…")
+    host = addr.split(":")[0] if ":" in addr else "127.0.0.1"
+
+    # Scan common ports on the same host
+    probe_ports = [8188, 8000, 8080, 7130]
+    for port in probe_ports:
+        alt = f"{host}:{port}"
+        if alt != addr and ComfyClient(alt).is_alive():
+            print(f"[cli] ComfyUI found at http://{alt}")
+            return alt
+
+    # Remote host: nothing more we can do — just warn and proceed
+    if not _is_local(host):
+        print(f"[cli] ⚠  ComfyUI not responding at {addr}")
+        print(f"[cli]    Verify ComfyUI is running on the remote host and the address is correct.")
+        print(f"[cli]    Proceeding with {addr} — the agent will fail if ComfyUI is unreachable.")
+        return addr
+
+    # Local host: try to launch the Desktop app (macOS)
+    print("[cli] ComfyUI not responding locally — attempting to open the app…")
     app_path = Path("/Applications/ComfyUI.app")
+    if not app_path.exists():
+        print(f"[cli] ⚠  ComfyUI Desktop app not found at {app_path}")
+        print(f"[cli]    Start ComfyUI manually, then re-run this command.")
+        return addr
     try:
         subprocess.Popen(
             ["open", str(app_path)],
@@ -232,16 +261,14 @@ def _ensure_comfyui_running(addr: str) -> str:
         return addr
 
     print("[cli] Waiting up to 60 s for ComfyUI to start…")
-    from .client import ComfyClient as CC
-
-    for port in (8188, 8000):
-        probe_addr = f"127.0.0.1:{port}"
-        probe = CC(probe_addr)
-        for _ in range(30):
-            time.sleep(2)
-            if probe.is_alive():
-                print(f"[cli] ComfyUI started at http://{probe_addr}")
-                return probe_addr
+    probe_addrs = [f"{host}:{p}" for p in probe_ports]
+    for _ in range(30):
+        time.sleep(2)
+        for pa in probe_addrs:
+            if ComfyClient(pa).is_alive():
+                print(f"[cli] ComfyUI started at http://{pa}")
+                return pa
+    print("[cli] ⚠  Timed out waiting for ComfyUI. Proceeding with {addr}.")
     return addr
 
 
