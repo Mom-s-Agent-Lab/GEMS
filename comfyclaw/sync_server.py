@@ -7,12 +7,16 @@ Runs in a background daemon thread using its own asyncio event loop so it
 never blocks the main harness loop.
 
 Supports these message types (server → client):
-  - ``workflow_update``   — full workflow snapshot (reconnect / initial load).
-  - ``workflow_diff``     — incremental ops (add_node, remove_node, update_node).
-  - ``request_feedback``  — ask the human for feedback on a generated image.
+  - ``workflow_update``      — full workflow snapshot (reconnect / initial load).
+  - ``workflow_diff``        — incremental ops (add_node, remove_node, update_node).
+  - ``request_feedback``     — ask the human for feedback on a generated image.
+  - ``generation_status``    — progress update during a generation run.
+  - ``generation_complete``  — run finished successfully.
+  - ``generation_error``     — run failed with an error.
 
 And these (client → server):
-  - ``human_feedback``    — human's text feedback, score, and action.
+  - ``human_feedback``       — human's text feedback, score, and action.
+  - ``trigger_generation``   — start a new generation run from ComfyUI.
 """
 
 from __future__ import annotations
@@ -92,9 +96,13 @@ class SyncServer:
         self._thread: threading.Thread | None = None
         self._stop_event: asyncio.Event | None = None
         self._ready = threading.Event()
+        self._started_ok = False
 
         self._feedback_future: asyncio.Future[dict] | None = None
         self._feedback_lock = threading.Lock()
+
+        self._trigger_future: asyncio.Future[dict] | None = None
+        self._trigger_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -112,6 +120,7 @@ class SyncServer:
             return  # already running
 
         self._ready.clear()
+        self._started_ok = False
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="comfyclaw-sync")
         self._thread.start()
         self._ready.wait(timeout=5)
@@ -125,7 +134,7 @@ class SyncServer:
         self._thread = None
 
     def is_running(self) -> bool:
-        return bool(self._thread and self._thread.is_alive())
+        return bool(self._started_ok and self._thread and self._thread.is_alive())
 
     def reset(self, *, empty: bool = False) -> None:
         """Clear remembered workflow state.
@@ -182,16 +191,25 @@ class SyncServer:
         if not self._loop or not self.is_running():
             return None
 
-        future: asyncio.Future[dict] = asyncio.run_coroutine_threadsafe(
+        async_future: asyncio.Future[dict] = asyncio.run_coroutine_threadsafe(
             self._create_feedback_future(), self._loop
         ).result(timeout=5)
 
+        blocking = asyncio.run_coroutine_threadsafe(
+            self._await_future(async_future), self._loop
+        )
         try:
-            return future.result(timeout=timeout)
+            return blocking.result(timeout=timeout)
         except Exception:
             with self._feedback_lock:
                 self._feedback_future = None
             return None
+
+    @staticmethod
+    async def _await_future(fut: asyncio.Future[dict]) -> dict:
+        """Await an asyncio.Future — used via ``run_coroutine_threadsafe``
+        so the calling thread gets a blocking ``concurrent.futures.Future``."""
+        return await fut
 
     async def _create_feedback_future(self) -> asyncio.Future[dict]:
         """Create and store a Future in the event loop thread."""
@@ -208,6 +226,89 @@ class SyncServer:
             if self._feedback_future and not self._feedback_future.done():
                 self._feedback_future.set_result(data)
                 self._feedback_future = None
+
+    # ------------------------------------------------------------------
+    # Generation triggers (ComfyUI panel → serve loop)
+    # ------------------------------------------------------------------
+
+    def wait_for_trigger(self, timeout: float = 0) -> dict | None:
+        """Block until a client sends ``trigger_generation``.
+
+        Parameters
+        ----------
+        timeout : Max seconds to wait.  0 means wait forever.
+
+        Returns the parsed trigger dict, or ``None`` on timeout / not running.
+        """
+        if not self._loop or not self.is_running():
+            return None
+
+        async_future: asyncio.Future[dict] = asyncio.run_coroutine_threadsafe(
+            self._create_trigger_future(), self._loop
+        ).result(timeout=5)
+
+        blocking = asyncio.run_coroutine_threadsafe(
+            self._await_future(async_future), self._loop
+        )
+        try:
+            return blocking.result(timeout=timeout if timeout > 0 else None)
+        except Exception:
+            with self._trigger_lock:
+                self._trigger_future = None
+            return None
+
+    async def _create_trigger_future(self) -> asyncio.Future[dict]:
+        loop = asyncio.get_running_loop()
+        with self._trigger_lock:
+            if self._trigger_future and not self._trigger_future.done():
+                self._trigger_future.cancel()
+            self._trigger_future = loop.create_future()
+            return self._trigger_future
+
+    def _resolve_trigger(self, data: dict) -> None:
+        with self._trigger_lock:
+            if self._trigger_future and not self._trigger_future.done():
+                self._trigger_future.set_result(data)
+                self._trigger_future = None
+
+    # ------------------------------------------------------------------
+    # Generation status broadcasts (serve loop → ComfyUI panel)
+    # ------------------------------------------------------------------
+
+    def send_status(self, state: str, iteration: int = 0, detail: str = "") -> None:
+        """Broadcast a ``generation_status`` message."""
+        self._send_json({
+            "type": "generation_status",
+            "state": state,
+            "iteration": iteration,
+            "detail": detail,
+        })
+
+    def send_complete(self, score: float, iterations_used: int, image_path: str = "") -> None:
+        """Broadcast a ``generation_complete`` message."""
+        self._send_json({
+            "type": "generation_complete",
+            "score": score,
+            "iterations_used": iterations_used,
+            "image_path": image_path,
+        })
+
+    def send_error(self, error: str) -> None:
+        """Broadcast a ``generation_error`` message."""
+        self._send_json({"type": "generation_error", "error": error})
+
+    def _send_json(self, msg: dict) -> None:
+        """Broadcast an arbitrary JSON message to all clients."""
+        if not self._loop or not self.is_running():
+            return
+        with self._clients_lock:
+            clients = set(self._clients)
+        if not clients:
+            return
+        payload = json.dumps(msg)
+        asyncio.run_coroutine_threadsafe(
+            self._async_broadcast(payload, clients), self._loop
+        )
 
     # ------------------------------------------------------------------
     # Broadcast
@@ -278,6 +379,7 @@ class SyncServer:
             async with websockets.server.serve(self._handler, self.host, self.port):
                 log.info("[SyncServer] Listening on ws://%s:%d", self.host, self.port)
                 print(f"[SyncServer] ✅ Listening on ws://{self.host}:{self.port}")
+                self._started_ok = True
                 self._ready.set()
                 await self._stop_event.wait()
         except Exception as exc:
@@ -307,9 +409,15 @@ class SyncServer:
             async for raw in websocket:
                 try:
                     msg = json.loads(raw)
-                    if isinstance(msg, dict) and msg.get("type") == "human_feedback":
+                    if not isinstance(msg, dict):
+                        continue
+                    msg_type = msg.get("type")
+                    if msg_type == "human_feedback":
                         log.info("[SyncServer] Received human_feedback")
                         self._resolve_feedback(msg)
+                    elif msg_type == "trigger_generation":
+                        log.info("[SyncServer] Received trigger_generation")
+                        self._resolve_trigger(msg)
                 except (json.JSONDecodeError, TypeError):
                     pass
         except Exception:

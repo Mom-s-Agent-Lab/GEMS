@@ -315,6 +315,114 @@ def _cmd_run(args: argparse.Namespace, dry: bool = False) -> None:
         print("\n[cli] Dry-run complete.")
 
 
+def _cmd_serve(args: argparse.Namespace) -> None:
+    """Persistent server mode — waits for trigger_generation from ComfyUI."""
+    from .harness import ClawHarness, HarnessConfig
+    from .sync_server import SyncServer
+
+    api_key = _api_key()
+    addr = _ensure_comfyui_running(_server_addr())
+
+    sync_port = 0 if args.no_sync else args.sync_port
+    if not sync_port:
+        sys.exit("[cli] Error: serve mode requires sync (WebSocket). Do not use --no-sync.")
+
+    verifier_model = args.verifier_model.strip() or None
+    base_cfg = dict(
+        api_key=api_key,
+        server_address=addr,
+        model=args.model,
+        verifier_model=verifier_model,
+        success_threshold=args.threshold,
+        sync_port=0,  # harness won't create its own SyncServer; we inject the shared one
+        skills_dir=args.skills_dir,
+        evolve_from_best=not args.reset_each_iter,
+        score_weights=_env_score_weights(),
+        image_model=args.image_model or None,
+        max_repair_attempts=args.max_repair_attempts,
+    )
+
+    print(f"\n[cli] ComfyClaw serve mode")
+    print(f"[cli] Agent model    : {args.model}")
+    print(f"[cli] Image model    : {base_cfg['image_model'] or '(from workflow)'}")
+    print(f"[cli] Sync port      : {sync_port}")
+    print(f"[cli] Waiting for triggers from ComfyUI panel…\n")
+
+    sync = SyncServer(port=sync_port)
+    sync.start()
+    if not sync.is_running():
+        sys.exit("[cli] Error: SyncServer failed to start. "
+                 f"Is port {sync_port} already in use?")
+
+    try:
+        while True:
+            print("[serve] ⏳ Waiting for generation trigger from ComfyUI…")
+            trigger = sync.wait_for_trigger(timeout=0)
+            if trigger is None:
+                continue
+
+            prompt = trigger.get("prompt", "").strip()
+            if not prompt:
+                sync.send_error("No prompt provided.")
+                continue
+
+            mode = trigger.get("mode", "scratch")
+            settings = trigger.get("settings") or {}
+            workflow = trigger.get("workflow") if mode == "improve" else {}
+            if workflow is None:
+                workflow = {}
+
+            iterations = settings.get("iterations", args.iterations)
+            verifier_mode = settings.get("verifier_mode", args.verifier_mode)
+
+            cfg = HarnessConfig(
+                **base_cfg,
+                max_iterations=iterations,
+                verifier_mode=verifier_mode,
+            )
+
+            mode_label = "from scratch" if mode == "scratch" else "improve current"
+            node_count = len(workflow) if workflow else 0
+            print(f"\n[serve] 🚀 Trigger received: {prompt[:80]!r}")
+            print(f"[serve]    Mode: {mode_label}, Iterations: {iterations}, "
+                  f"Verifier: {verifier_mode}, Nodes: {node_count}")
+
+            sync.send_status("running", iteration=0, detail="Initializing agent…")
+
+            try:
+                harness = ClawHarness.from_workflow_dict(workflow, cfg)
+                harness._sync = sync
+                harness._agent.on_change = harness._on_workflow_change
+
+                def _status_cb(state: str, iteration: int = 0, detail: str = "") -> None:
+                    sync.send_status(state, iteration, detail)
+                harness.on_status = _status_cb
+
+                result = harness.run(prompt=prompt)
+
+                if result:
+                    out_dir = (
+                        Path(args.output_dir) if args.output_dir
+                        else Path.cwd() / "comfyclaw_output"
+                    )
+                    saved = _save_image(result, prompt, out_dir)
+                    sync.send_complete(
+                        score=0.0,
+                        iterations_used=iterations,
+                        image_path=str(saved),
+                    )
+                else:
+                    sync.send_complete(score=0.0, iterations_used=0, image_path="")
+            except Exception as exc:
+                print(f"[serve] ❌ Error: {exc}")
+                sync.send_error(str(exc))
+
+    except KeyboardInterrupt:
+        print("\n[serve] Shutting down…")
+    finally:
+        sync.stop()
+
+
 def _cmd_install_node(args: argparse.Namespace) -> None:
     comfyui_dir = Path(args.comfyui_dir).expanduser() if args.comfyui_dir else _comfyui_dir()
     _install_node(comfyui_dir)
@@ -432,6 +540,13 @@ def _build_parser() -> argparse.ArgumentParser:
     dry_p = sub.add_parser("dry-run", help="Run agent only (no ComfyUI execution)")
     _add_run_args(dry_p)
     dry_p.set_defaults(func=lambda a: _cmd_run(a, dry=True))
+
+    serve_p = sub.add_parser(
+        "serve",
+        help="Start persistent server — listen for generation triggers from ComfyUI",
+    )
+    _add_run_args(serve_p)
+    serve_p.set_defaults(func=_cmd_serve)
 
     inst_p = sub.add_parser("install-node", help="Symlink ComfyClaw-Sync custom node into ComfyUI")
     inst_p.add_argument(

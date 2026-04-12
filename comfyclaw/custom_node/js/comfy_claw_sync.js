@@ -1,5 +1,5 @@
 /**
- * ComfyClaw Sync Extension  v3.0
+ * ComfyClaw Sync Extension  v4.0
  *
  * Connects to the ComfyClaw Python sync server (ws://127.0.0.1:8765 by default)
  * and reloads the ComfyUI canvas in real time whenever the agent modifies the
@@ -474,6 +474,219 @@ async function applyDiffOps(ops) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ComfyClaw generation panel (trigger runs from within ComfyUI)
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _clawPanel = null;
+let _clawPanelRunning = false;
+
+function createClawPanel() {
+  const panel = document.createElement("div");
+  panel.id = "comfyclaw-gen-panel";
+  Object.assign(panel.style, {
+    position:      "fixed",
+    top:           "60px",
+    right:         "12px",
+    width:         "320px",
+    zIndex:        "9998",
+    background:    "#1e1e2e",
+    color:         "#cdd6f4",
+    borderRadius:  "12px",
+    boxShadow:     "0 4px 24px rgba(0,0,0,0.4)",
+    fontFamily:    "system-ui, -apple-system, sans-serif",
+    fontSize:      "13px",
+    lineHeight:    "1.5",
+    overflow:      "hidden",
+    transition:    "transform 0.2s, opacity 0.2s",
+  });
+
+  panel.innerHTML = `
+    <div id="comfyclaw-gen-header" style="padding:12px 16px; background:#313244;
+         cursor:pointer; display:flex; justify-content:space-between; align-items:center;
+         user-select:none;">
+      <span style="font-weight:700; font-size:14px;">🐾 ComfyClaw</span>
+      <span id="comfyclaw-gen-toggle" style="font-size:11px; color:#a6adc8;">▼</span>
+    </div>
+    <div id="comfyclaw-gen-body" style="padding:16px;">
+      <label style="display:block; margin-bottom:4px; font-weight:600; color:#a6adc8; font-size:12px;">
+        Prompt
+      </label>
+      <textarea id="comfyclaw-gen-prompt" rows="3"
+        placeholder="Describe what you want to generate..."
+        style="width:100%; box-sizing:border-box; background:#313244; color:#cdd6f4;
+               border:1px solid #45475a; border-radius:8px; padding:8px; font-size:13px;
+               font-family:inherit; resize:vertical; margin-bottom:12px;"></textarea>
+
+      <label style="display:block; margin-bottom:4px; font-weight:600; color:#a6adc8; font-size:12px;">
+        Mode
+      </label>
+      <div id="comfyclaw-gen-mode" style="display:flex; gap:6px; margin-bottom:12px;">
+        <button data-mode="scratch" class="comfyclaw-mode-btn" style="flex:1; padding:6px 4px;
+                border:2px solid #cba6f7; border-radius:8px; background:#cba6f722;
+                color:#cba6f7; cursor:pointer; font-size:12px; font-weight:600;">
+          ✨ From Scratch
+        </button>
+        <button data-mode="improve" class="comfyclaw-mode-btn" style="flex:1; padding:6px 4px;
+                border:2px solid #45475a; border-radius:8px; background:#313244;
+                color:#cdd6f4; cursor:pointer; font-size:12px; font-weight:600;">
+          🔧 Improve Current
+        </button>
+      </div>
+
+      <details style="margin-bottom:12px;">
+        <summary style="cursor:pointer; color:#a6adc8; font-size:12px; font-weight:600;">
+          Settings
+        </summary>
+        <div style="padding-top:8px;">
+          <div style="display:flex; gap:8px; align-items:center; margin-bottom:6px;">
+            <label style="color:#a6adc8; font-size:12px; min-width:70px;">Iterations</label>
+            <input id="comfyclaw-gen-iters" type="number" min="1" max="20" value="3"
+              style="width:60px; background:#313244; color:#cdd6f4; border:1px solid #45475a;
+                     border-radius:6px; padding:4px 8px; font-size:13px;">
+          </div>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <label style="color:#a6adc8; font-size:12px; min-width:70px;">Verifier</label>
+            <select id="comfyclaw-gen-verifier"
+              style="flex:1; background:#313244; color:#cdd6f4; border:1px solid #45475a;
+                     border-radius:6px; padding:4px 8px; font-size:13px;">
+              <option value="vlm">VLM (auto)</option>
+              <option value="human">Human</option>
+              <option value="hybrid">Hybrid</option>
+            </select>
+          </div>
+        </div>
+      </details>
+
+      <button id="comfyclaw-gen-btn" style="width:100%; padding:10px; border:none;
+              border-radius:8px; background:#a6e3a1; color:#1e1e2e; cursor:pointer;
+              font-size:14px; font-weight:700; transition:background 0.15s;">
+        ▶ Generate
+      </button>
+      <button id="comfyclaw-gen-stop" style="display:none; width:100%; padding:10px;
+              border:none; border-radius:8px; background:#f38ba8; color:#1e1e2e;
+              cursor:pointer; font-size:14px; font-weight:700; margin-top:6px;">
+        ■ Stop
+      </button>
+
+      <div id="comfyclaw-gen-status" style="margin-top:12px; padding:8px 10px;
+           background:#313244; border-radius:8px; font-size:12px; color:#a6adc8;
+           display:none;"></div>
+    </div>
+  `;
+
+  document.body.appendChild(panel);
+
+  // Mode toggle
+  let selectedMode = "scratch";
+  const modeContainer = panel.querySelector("#comfyclaw-gen-mode");
+  modeContainer.querySelectorAll(".comfyclaw-mode-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      selectedMode = btn.dataset.mode;
+      modeContainer.querySelectorAll(".comfyclaw-mode-btn").forEach(b => {
+        b.style.borderColor = "#45475a";
+        b.style.background = "#313244";
+        b.style.color = "#cdd6f4";
+      });
+      btn.style.borderColor = "#cba6f7";
+      btn.style.background = "#cba6f722";
+      btn.style.color = "#cba6f7";
+    });
+  });
+
+  // Collapse/expand
+  const header = panel.querySelector("#comfyclaw-gen-header");
+  const body = panel.querySelector("#comfyclaw-gen-body");
+  const toggle = panel.querySelector("#comfyclaw-gen-toggle");
+  let collapsed = false;
+  header.addEventListener("click", () => {
+    collapsed = !collapsed;
+    body.style.display = collapsed ? "none" : "block";
+    toggle.textContent = collapsed ? "▶" : "▼";
+  });
+
+  // Generate button
+  panel.querySelector("#comfyclaw-gen-btn").addEventListener("click", async () => {
+    const prompt = panel.querySelector("#comfyclaw-gen-prompt").value.trim();
+    if (!prompt) {
+      panel.querySelector("#comfyclaw-gen-prompt").focus();
+      return;
+    }
+    let workflow = null;
+    if (selectedMode === "improve") {
+      workflow = await exportCurrentWorkflow();
+    }
+    const msg = {
+      type:     "trigger_generation",
+      prompt:   prompt,
+      mode:     selectedMode,
+      workflow: workflow,
+      settings: {
+        iterations:    parseInt(panel.querySelector("#comfyclaw-gen-iters").value) || 3,
+        verifier_mode: panel.querySelector("#comfyclaw-gen-verifier").value,
+      },
+    };
+    if (_activeSyncClient?.ws?.readyState === WebSocket.OPEN) {
+      _activeSyncClient.ws.send(JSON.stringify(msg));
+      console.log("[ComfyClaw] Sent trigger_generation:", msg.mode, msg.prompt.slice(0, 60));
+      setGenRunning(true);
+      setGenStatus("running", "Waiting for agent...");
+    }
+  });
+
+  // Stop button
+  panel.querySelector("#comfyclaw-gen-stop").addEventListener("click", () => {
+    if (_activeSyncClient?.ws?.readyState === WebSocket.OPEN) {
+      _activeSyncClient.ws.send(JSON.stringify({ type: "cancel_generation" }));
+    }
+    setGenRunning(false);
+    setGenStatus("idle", "Cancelled.");
+  });
+
+  return panel;
+}
+
+async function exportCurrentWorkflow() {
+  try {
+    if (typeof app.graphToPrompt === "function") {
+      const result = await app.graphToPrompt();
+      return result?.output || result?.workflow || null;
+    }
+  } catch (err) {
+    console.warn("[ComfyClaw] Failed to export workflow:", err);
+  }
+  if (Object.keys(_currentApiWorkflow).length > 0) {
+    return JSON.parse(JSON.stringify(_currentApiWorkflow));
+  }
+  return null;
+}
+
+function setGenRunning(running) {
+  _clawPanelRunning = running;
+  if (!_clawPanel) return;
+  const genBtn  = _clawPanel.querySelector("#comfyclaw-gen-btn");
+  const stopBtn = _clawPanel.querySelector("#comfyclaw-gen-stop");
+  genBtn.style.display  = running ? "none" : "block";
+  stopBtn.style.display = running ? "block" : "none";
+}
+
+function setGenStatus(state, text) {
+  if (!_clawPanel) return;
+  const el = _clawPanel.querySelector("#comfyclaw-gen-status");
+  el.style.display = text ? "block" : "none";
+
+  const colors = {
+    running:   "#89b4fa",
+    verifying: "#f9e2af",
+    repairing: "#fab387",
+    complete:  "#a6e3a1",
+    error:     "#f38ba8",
+    idle:      "#a6adc8",
+  };
+  el.style.color = colors[state] || "#a6adc8";
+  el.textContent = text;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // WebSocket client with auto-reconnect
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -561,6 +774,20 @@ class SyncClient {
     } else if (msg.type === "request_feedback") {
       console.log("[ComfyClaw] Feedback requested for iteration", msg.iteration);
       showFeedbackPanel(msg);
+    } else if (msg.type === "generation_status") {
+      const detail = msg.detail || msg.state;
+      const iter = msg.iteration ? ` (iter ${msg.iteration})` : "";
+      setGenStatus(msg.state, `${detail}${iter}`);
+      console.log(`[ComfyClaw] Generation status: ${msg.state}${iter}`);
+    } else if (msg.type === "generation_complete") {
+      setGenRunning(false);
+      setGenStatus("complete",
+        `Done! Score: ${(msg.score ?? 0).toFixed(2)} in ${msg.iterations_used} iteration(s)`);
+      console.log("[ComfyClaw] Generation complete:", msg);
+    } else if (msg.type === "generation_error") {
+      setGenRunning(false);
+      setGenStatus("error", `Error: ${msg.error}`);
+      console.error("[ComfyClaw] Generation error:", msg.error);
     }
   }
 
@@ -589,8 +816,9 @@ app.registerExtension({
   name: "ComfyClaw.SyncBridge",
 
   async setup() {
-    console.log("[ComfyClaw] Extension loaded — ComfyClaw Sync Bridge v3.0");
+    console.log("[ComfyClaw] Extension loaded — ComfyClaw Sync Bridge v4.0");
     statusEl = createStatusBadge();
+    _clawPanel = createClawPanel();
     setTimeout(() => {
       _activeSyncClient = new SyncClient();
       _activeSyncClient.connect();

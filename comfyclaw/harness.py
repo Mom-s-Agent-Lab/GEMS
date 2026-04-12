@@ -42,6 +42,10 @@ _INFRA_ERROR_SIGNALS = (
     "BrokenPipeError",
 )
 
+from typing import Callable
+
+_StatusCallback = Callable[[str, int, str], None]
+
 log = logging.getLogger(__name__)
 
 
@@ -203,6 +207,8 @@ class ClawHarness:
         self._memory = ClawMemory(max_images=config.max_images)
         self._evolution_log = EvolutionLog()
 
+        self.on_status: _StatusCallback | None = None
+
         self._agent = ClawAgent(
             api_key=config.api_key,
             model=config.model,
@@ -295,6 +301,7 @@ class ClawHarness:
 
         for iteration in range(1, cfg.max_iterations + 1):
             print(f"\n--- Iteration {iteration}/{cfg.max_iterations} ---")
+            self._emit_status("running", iteration, f"Iteration {iteration}/{cfg.max_iterations}")
 
             # ── Choose starting workflow ───────────────────────────────────
             if cfg.evolve_from_best and best_workflow_snapshot is not None:
@@ -386,6 +393,8 @@ class ClawHarness:
                     else f"Repair {repair_round}/{cfg.max_repair_attempts}"
                 )
                 print(f"[ClawHarness] 🚀 {label} to ComfyUI…")
+                if repair_round > 0:
+                    self._emit_status("repairing", iteration, f"Repair attempt {repair_round}")
 
                 # On repair rounds let the agent fix the workflow in-place.
                 if repair_round > 0:
@@ -536,6 +545,7 @@ class ClawHarness:
 
             # ── Verify ────────────────────────────────────────────────────
             print("[ClawHarness] 🔍 Verifying image…")
+            self._emit_status("verifying", iteration, "Verifying image…")
             result = self._verifier.verify(image_bytes, prompt, iteration=iteration)
             last_result = result
             print(f"[ClawHarness] Score: {result.score:.2f}")
@@ -575,6 +585,13 @@ class ClawHarness:
     # ------------------------------------------------------------------
     # Callbacks & helpers
     # ------------------------------------------------------------------
+
+    def _emit_status(self, state: str, iteration: int = 0, detail: str = "") -> None:
+        if self.on_status:
+            try:
+                self.on_status(state, iteration, detail)
+            except Exception:
+                pass
 
     def _on_workflow_change(self, workflow: dict) -> None:
         if self._sync:

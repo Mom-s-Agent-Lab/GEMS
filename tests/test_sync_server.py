@@ -310,3 +310,98 @@ class TestSyncServerFeedback:
         srv = self._make_server()
         result = srv.wait_for_human_feedback(timeout=0.1)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Generation trigger / status tests
+# ---------------------------------------------------------------------------
+
+
+class TestSyncServerTrigger:
+    @staticmethod
+    def _make_server():
+        return SyncServer(port=0, host="127.0.0.1")
+
+    def test_resolve_trigger(self):
+        import asyncio
+
+        srv = self._make_server()
+        loop = asyncio.new_event_loop()
+        try:
+            future = loop.create_future()
+            srv._trigger_future = future
+            data = {"type": "trigger_generation", "prompt": "a cat", "mode": "scratch"}
+            srv._resolve_trigger(data)
+            assert future.done()
+            assert future.result() == data
+            assert srv._trigger_future is None
+        finally:
+            loop.close()
+
+    def test_resolve_trigger_no_pending(self):
+        srv = self._make_server()
+        srv._resolve_trigger({"prompt": "test"})  # no-op, should not raise
+
+    def test_wait_for_trigger_returns_none_when_not_running(self):
+        srv = self._make_server()
+        result = srv.wait_for_trigger(timeout=0.1)
+        assert result is None
+
+    def test_send_status_broadcasts(self):
+        srv = self._make_server()
+        srv._loop = MagicMock()
+        srv._thread = MagicMock()
+        srv._thread.is_alive.return_value = True
+        mock_ws = MagicMock()
+        srv._clients.add(mock_ws)
+
+        with patch("asyncio.run_coroutine_threadsafe") as mock_run:
+            srv.send_status("running", iteration=1, detail="Building workflow")
+
+        assert mock_run.called
+
+    def test_send_complete_broadcasts(self):
+        srv = self._make_server()
+        srv._loop = MagicMock()
+        srv._thread = MagicMock()
+        srv._thread.is_alive.return_value = True
+        mock_ws = MagicMock()
+        srv._clients.add(mock_ws)
+
+        with patch("asyncio.run_coroutine_threadsafe") as mock_run:
+            srv.send_complete(score=0.85, iterations_used=2, image_path="/tmp/out.png")
+
+        assert mock_run.called
+
+    def test_send_error_broadcasts(self):
+        srv = self._make_server()
+        srv._loop = MagicMock()
+        srv._thread = MagicMock()
+        srv._thread.is_alive.return_value = True
+        mock_ws = MagicMock()
+        srv._clients.add(mock_ws)
+
+        with patch("asyncio.run_coroutine_threadsafe") as mock_run:
+            srv.send_error("something went wrong")
+
+        assert mock_run.called
+
+    def test_send_status_noop_no_clients(self):
+        srv = self._make_server()
+        srv._loop = MagicMock()
+        srv._thread = MagicMock()
+        srv._thread.is_alive.return_value = True
+
+        with patch("asyncio.run_coroutine_threadsafe") as mock_run:
+            srv.send_status("running")
+
+        assert not mock_run.called
+
+    def test_send_status_noop_not_running(self):
+        srv = self._make_server()
+        srv._clients.add(MagicMock())
+
+        with patch("asyncio.run_coroutine_threadsafe") as mock_run:
+            srv.send_status("running")
+
+        assert not mock_run.called
