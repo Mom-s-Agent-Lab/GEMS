@@ -168,12 +168,16 @@ class ClawVerifier:
         model: str = "anthropic/claude-sonnet-4-5",
         score_weights: tuple[float, float] = (0.6, 0.4),
         max_workers: int = 6,
+        multi_scale: bool = False,
+        weighted_requirements: bool = False,
     ) -> None:
         if api_key:
             os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
         self.model = model
         self.score_weights = score_weights
         self.max_workers = max_workers
+        self.multi_scale = multi_scale
+        self.weighted_requirements = weighted_requirements
 
     # ------------------------------------------------------------------
     # Public API
@@ -188,7 +192,6 @@ class ClawVerifier:
         image_bytes : Raw image bytes (PNG or JPEG).
         prompt      : The original text prompt used to generate the image.
         """
-        # Encode once — shared across all parallel requirement checks
         b64_data = base64.standard_b64encode(image_bytes).decode()
         media_type = _detect_media_type(image_bytes)
 
@@ -201,7 +204,16 @@ class ClawVerifier:
 
         passed = [c.question for c in checks if c.passed]
         failed = [c.question for c in checks if not c.passed]
-        req_score = len(passed) / len(checks) if checks else 0.0
+
+        if self.weighted_requirements:
+            from .verifier_utils import weighted_requirement_score
+
+            req_score = weighted_requirement_score(
+                [c.question for c in checks],
+                [c.passed for c in checks],
+            )
+        else:
+            req_score = len(passed) / len(checks) if checks else 0.0
 
         detail_score = detail.get("score")
         w_req, w_det = self.score_weights
@@ -221,6 +233,11 @@ class ClawVerifier:
             for ri in detail.get("region_issues", [])
         ]
 
+        # Multi-scale: run additional checks on key regions
+        if self.multi_scale and image_bytes:
+            region_checks = self._multi_scale_verify(image_bytes, prompt, media_type)
+            region_issues.extend(region_checks)
+
         return VerifierResult(
             score=round(score, 3),
             checks=checks,
@@ -230,6 +247,106 @@ class ClawVerifier:
             overall_assessment=detail.get("overall_assessment", ""),
             evolution_suggestions=detail.get("evolution_suggestions", []),
         )
+
+    def verify_comparative(
+        self,
+        image_a: bytes,
+        image_b: bytes,
+        prompt: str,
+    ) -> dict:
+        """Compare two images and return which is better and why.
+
+        Returns a dict with ``winner`` ("A" or "B"), ``confidence``,
+        ``reason``, and per-image strengths/weaknesses.
+        """
+        from .verifier_utils import (
+            build_comparative_message,
+            encode_image_b64,
+            parse_comparative_result,
+        )
+
+        a_b64 = encode_image_b64(image_a)
+        b_b64 = encode_image_b64(image_b)
+        media_type = _detect_media_type(image_a)
+
+        messages = build_comparative_message(a_b64, b_b64, prompt, media_type)
+        try:
+            resp = litellm.completion(
+                model=self.model,
+                max_tokens=1024,
+                messages=messages,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            return parse_comparative_result(text)
+        except Exception as exc:
+            return {"winner": "A", "confidence": 0.5, "reason": f"Error: {exc}"}
+
+    def _multi_scale_verify(
+        self,
+        image_bytes: bytes,
+        prompt: str,
+        media_type: str,
+    ) -> list[RegionIssue]:
+        """Verify key regions at higher zoom for granular feedback."""
+        from .verifier_utils import crop_region, encode_image_b64
+
+        regions_to_check = ["face_region", "center", "background"]
+        issues: list[RegionIssue] = []
+
+        _REGION_CHECK_PROMPT = (
+            "Examine this cropped region of a generated image. "
+            "The full image was generated from: {prompt}\n"
+            "This crop shows the {region} area.\n"
+            "List any quality issues (artifacts, anatomy errors, blur, "
+            "inconsistencies). Respond with JSON:\n"
+            '{{"issues": [{{"issue": "description", "severity": "low|medium|high"}}]}}\n'
+            "If no issues, respond: {{\"issues\": []}}"
+        )
+
+        for region_name in regions_to_check:
+            try:
+                cropped = crop_region(image_bytes, region_name)
+                b64 = encode_image_b64(cropped)
+                image_block = {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{media_type};base64,{b64}"},
+                }
+                resp = litellm.completion(
+                    model=self.model,
+                    max_tokens=512,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                image_block,
+                                {
+                                    "type": "text",
+                                    "text": _REGION_CHECK_PROMPT.format(
+                                        prompt=prompt, region=region_name,
+                                    ),
+                                },
+                            ],
+                        }
+                    ],
+                )
+                text = (resp.choices[0].message.content or "").strip()
+                m = re.search(r"\{.*\}", text, re.DOTALL)
+                if m:
+                    data = json.loads(m.group())
+                    for iss in data.get("issues", []):
+                        issues.append(
+                            RegionIssue(
+                                region=region_name,
+                                issue_type="detail",
+                                description=iss.get("issue", ""),
+                                severity=iss.get("severity", "medium"),
+                                fix_strategies=[],
+                            )
+                        )
+            except Exception:
+                pass
+
+        return issues
 
     # ------------------------------------------------------------------
     # Private helpers

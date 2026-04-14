@@ -485,6 +485,85 @@ def _cmd_serve(args: argparse.Namespace) -> None:
         sync.stop()
 
 
+def _cmd_benchmark(args: argparse.Namespace) -> None:
+    """Run a T2I benchmark suite."""
+    import logging
+
+    from .benchmark import BenchmarkConfig, BenchmarkRunner
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    )
+
+    config = BenchmarkConfig(
+        suite=args.suite,
+        name=args.name,
+        data_path=args.data_path,
+        output_dir=args.output_dir,
+        max_iterations=args.max_iterations,
+        num_workers=args.num_workers,
+        server_address=args.comfyui_addr,
+        api_key=_api_key(),
+        model=args.model,
+        image_model=args.image_model,
+        workflow_path=args.workflow,
+        stage_gated=args.stage_gated,
+        verifier_model=args.verifier_model,
+        max_prompts=args.max_prompts,
+    )
+
+    runner = BenchmarkRunner(config)
+    result = runner.run()
+
+    print("\n" + "=" * 50)
+    print(result.summary())
+    print("=" * 50)
+
+
+def _cmd_evolve(args: argparse.Namespace) -> None:
+    """Run a self-evolution cycle on benchmark results."""
+    import json
+    import logging
+
+    from .evolve import SkillEvolver
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    )
+
+    with open(args.results, "r", encoding="utf-8") as f:
+        results = json.load(f)
+
+    skills_dir = args.skills_dir or str(
+        Path(__file__).resolve().parent / "skills"
+    )
+
+    evolver = SkillEvolver(
+        skills_dir=skills_dir,
+        llm_model=args.model,
+        api_key=_api_key(),
+        min_improvement=args.min_improvement,
+        max_mutations_per_cycle=args.max_mutations,
+    )
+
+    reports = evolver.run_multi_cycle(
+        results=results,
+        max_cycles=args.max_cycles,
+    )
+
+    print("\n" + "=" * 50)
+    print("Evolution Summary")
+    print("=" * 50)
+    for report in reports:
+        print(report.summary())
+        print("-" * 30)
+    print(f"Total cycles: {len(reports)}")
+    if reports:
+        print(f"Final score: {reports[-1].post_mean_score:.4f}")
+
+
 def _cmd_install_node(args: argparse.Namespace) -> None:
     comfyui_dir = Path(args.comfyui_dir).expanduser() if args.comfyui_dir else _comfyui_dir()
     _install_node(comfyui_dir)
@@ -636,6 +715,41 @@ def _build_parser() -> argparse.ArgumentParser:
 
     np_p = sub.add_parser("node-path", help="Print path to the bundled ComfyClaw-Sync plugin")
     np_p.set_defaults(func=_cmd_node_path)
+
+    # ── benchmark subcommand ──────────────────────────────────────────
+    bench_p = sub.add_parser(
+        "benchmark",
+        help="Run T2I evaluation benchmarks (GenEval2, CREA, OneIG-EN)",
+    )
+    bench_p.add_argument("--suite", required=True, choices=["geneval2", "crea", "oneig"])
+    bench_p.add_argument("--name", required=True, help="Experiment name")
+    bench_p.add_argument("--data-path", required=True, help="Path to benchmark JSONL data")
+    bench_p.add_argument("--output-dir", default="benchmark_results")
+    bench_p.add_argument("--max-iterations", type=int, default=3)
+    bench_p.add_argument("--num-workers", type=int, default=1)
+    bench_p.add_argument("--max-prompts", type=int, default=None)
+    bench_p.add_argument("--stage-gated", action="store_true")
+    bench_p.add_argument("--comfyui-addr", default=_server_addr())
+    bench_p.add_argument("--model", default=_env_str("COMFYCLAW_MODEL", "anthropic/claude-sonnet-4-5"))
+    bench_p.add_argument("--image-model", default=None)
+    bench_p.add_argument("--workflow", default=None)
+    bench_p.add_argument("--verifier-model", default=None)
+    bench_p.add_argument("--verbose", action="store_true")
+    bench_p.set_defaults(func=_cmd_benchmark)
+
+    # ── evolve subcommand ─────────────────────────────────────────────
+    evolve_p = sub.add_parser(
+        "evolve",
+        help="Run self-evolution cycle on benchmark results",
+    )
+    evolve_p.add_argument("--results", required=True, help="Path to benchmark results.json")
+    evolve_p.add_argument("--skills-dir", default=None, help="Skills directory to evolve")
+    evolve_p.add_argument("--model", default=_env_str("COMFYCLAW_MODEL", "anthropic/claude-sonnet-4-5"))
+    evolve_p.add_argument("--max-cycles", type=int, default=5)
+    evolve_p.add_argument("--min-improvement", type=float, default=0.02)
+    evolve_p.add_argument("--max-mutations", type=int, default=3)
+    evolve_p.add_argument("--verbose", action="store_true")
+    evolve_p.set_defaults(func=_cmd_evolve)
 
     return parser
 

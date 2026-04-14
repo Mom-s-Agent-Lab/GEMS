@@ -96,6 +96,7 @@ class HarnessConfig:
     image_model: str | None = None
     max_repair_attempts: int = 2
     verifier_mode: str = "vlm"  # "vlm", "human", or "hybrid"
+    stage_gated: bool = False
     """
     Pin the image-generation model (checkpoint / UNET) used by ComfyUI.
 
@@ -216,6 +217,7 @@ class ClawHarness:
             skills_dir=config.skills_dir,
             on_change=self._on_workflow_change,
             pinned_image_model=config.image_model,
+            stage_gated=config.stage_gated,
         )
         self._agent.on_agent_event = self._on_agent_event
         self._current_iteration = 0

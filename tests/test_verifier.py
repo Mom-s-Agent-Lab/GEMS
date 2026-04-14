@@ -52,6 +52,8 @@ def _make_verifier() -> ClawVerifier:
     verifier.model = "anthropic/claude-test"
     verifier.score_weights = (0.6, 0.4)
     verifier.max_workers = 2
+    verifier.multi_scale = False
+    verifier.weighted_requirements = False
     return verifier
 
 
@@ -284,6 +286,8 @@ class TestScoreBlending:
         v.model = "anthropic/claude-test"
         v.score_weights = (0.5, 0.5)
         v.max_workers = 2
+        v.multi_scale = False
+        v.weighted_requirements = False
         with patch("litellm.completion", side_effect=side_effects):
             result = v.verify(png_bytes, "p")
         # 0.5 * 0.5 + 0.5 * 0.8 = 0.65

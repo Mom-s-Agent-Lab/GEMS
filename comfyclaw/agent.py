@@ -31,6 +31,7 @@ from collections.abc import Callable
 import litellm
 
 from .skill_manager import SkillManager
+from .stage_router import StageRouter
 from .workflow import WorkflowManager
 
 
@@ -147,6 +148,19 @@ Decision heuristics
   Prompt is flat / needs artistic depth→ read_skill("prompt-artist")
   Multiple objects with spatial layout → read_skill("spatial")
   Text / sign / label in the image     → read_skill("text-rendering")
+
+Structural upgrade priority (iteration 2+)
+------------------------------------------
+When the workflow already has nodes AND verifier feedback is present:
+  • Do NOT just refine the prompt — prompt-only changes plateau quickly.
+  • PREFER structural upgrades: LoRA, ControlNet, hires-fix, regional, inpaint.
+  • If ANY region_issue has fix_strategies containing "inject_lora_*" or
+    "add_controlnet_*", you MUST attempt that structural upgrade, not fall
+    back to prompt tweaking. Call query_available_models first; if a matching
+    model exists, read the corresponding skill and apply it.
+  • Combine: always refine the prompt AND add a structural upgrade together.
+  • Only fall back to prompt-only when no LoRA / ControlNet / inpaint models
+    are installed or the fix strategies are exclusively prompt-related.
 
 Human-in-the-loop feedback
 --------------------------
@@ -473,6 +487,41 @@ _TOOLS: list[dict] = [
             "required": ["skill_name"],
         },
     ),
+    _tool(
+        "explore_nodes",
+        (
+            "Explore the ComfyUI server's node ecosystem. Queries /object_info, "
+            "classifies every node into pipeline stages, and returns a stage map "
+            "showing which nodes and tools are relevant at each workflow phase."
+        ),
+        {"type": "object", "properties": {}, "required": []},
+    ),
+    _tool(
+        "transition_stage",
+        (
+            "Advance to the next pipeline stage. The agent progresses through: "
+            "planning -> construction -> conditioning -> enhancement -> finalization. "
+            "Only tools relevant to the current stage are exposed. "
+            "Call this when the current stage's work is complete."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "target_stage": {
+                    "type": "string",
+                    "description": (
+                        "Stage to transition to: planning | construction | "
+                        "conditioning | enhancement | finalization"
+                    ),
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": "Why this stage transition is appropriate now.",
+                },
+            },
+            "required": ["target_stage"],
+        },
+    ),
 ]
 
 
@@ -508,6 +557,7 @@ class ClawAgent:
         on_change: Callable[[dict], None] | None = None,
         max_tool_rounds: int = 40,
         pinned_image_model: str | None = None,
+        stage_gated: bool = False,
     ) -> None:
         # Propagate the API key into the environment so LiteLLM picks it up.
         # For Anthropic keys (sk-ant-…) we set ANTHROPIC_API_KEY; for other
@@ -524,6 +574,7 @@ class ClawAgent:
         self.on_agent_event: Callable[[str, str, str, dict | None], None] | None = None
         self.max_tool_rounds = max_tool_rounds
         self.pinned_image_model = pinned_image_model
+        self.stage_router = StageRouter(enabled=stage_gated)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -566,14 +617,16 @@ class ClawAgent:
         rationale = "(no rationale provided)"
         rounds = 0
 
+        self.stage_router.reset()
         self._emit_event("info", f"Starting agent loop (model: {self.model})")
 
         while rounds < self.max_tool_rounds:
             rounds += 1
+            active_tools = self.stage_router.filter_tools(_TOOLS)
             resp = litellm.completion(
                 model=self.model,
                 max_tokens=4096,
-                tools=_TOOLS,
+                tools=active_tools,
                 messages=messages,
             )
             choice = resp.choices[0]
@@ -757,11 +810,76 @@ class ClawAgent:
                 case "read_skill":
                     return self._read_skill(inputs["skill_name"]), False
 
+                case "explore_nodes":
+                    return self._explore_nodes(), False
+
+                case "transition_stage":
+                    return self._transition_stage(inputs), False
+
                 case _:
                     return f"❌ Unknown tool: {name}", False
 
         except Exception as exc:
             return f"❌ Tool error ({name}): {exc}", False
+
+    # ------------------------------------------------------------------
+    # Node exploration
+    # ------------------------------------------------------------------
+
+    def _explore_nodes(self) -> str:
+        """Query ComfyUI /object_info and return a stage-classified summary."""
+        from .skills.explore.scripts.explore_nodes import explore
+
+        try:
+            stage_map = explore(self.server_address)
+        except Exception as exc:
+            return f"❌ Exploration failed: {exc}"
+
+        lines = [
+            f"Discovered {stage_map['total_nodes_discovered']} node classes.",
+            "",
+        ]
+        for name, data in stage_map["stages"].items():
+            nc = data["node_count"]
+            nodes_preview = ", ".join(data["node_classes"][:8])
+            if nc > 8:
+                nodes_preview += f", ... (+{nc - 8} more)"
+            lines.append(f"**{name}** ({nc} nodes): {nodes_preview}")
+            lines.append(f"  Tools: {', '.join(data['agent_tools'])}")
+
+        if stage_map["unclassified_count"] > 0:
+            lines.append(f"\nUnclassified: {stage_map['unclassified_count']} nodes")
+
+        self._emit_event("info", f"Explored {stage_map['total_nodes_discovered']} nodes")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Stage transitions
+    # ------------------------------------------------------------------
+
+    def _transition_stage(self, inputs: dict) -> str:
+        """Advance the pipeline stage for stage-gated tool filtering."""
+        target = inputs.get("target_stage", "")
+        rationale = inputs.get("rationale", "")
+
+        if not self.stage_router.enabled:
+            return "Stage gating is disabled — all tools are always available."
+
+        try:
+            old_stage = self.stage_router.current_stage
+            self.stage_router.transition_to(target)
+            self._emit_event(
+                "stage_transition",
+                f"Stage: {old_stage} → {target}",
+            )
+            tools = self.stage_router.get_current_tool_names()
+            return (
+                f"✅ Transitioned from '{old_stage}' to '{target}'.\n"
+                f"Available tools: {', '.join(tools)}\n"
+                f"Rationale: {rationale}"
+            )
+        except ValueError as exc:
+            return f"❌ Stage transition failed: {exc}"
 
     # ------------------------------------------------------------------
     # Skill reader (progressive disclosure — stage 2)
@@ -788,6 +906,32 @@ class ClawAgent:
     # Topology builders
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _detect_clip_slot(wm: WorkflowManager, node_id: str) -> int:
+        """Return the output slot index that carries CLIP for *node_id*.
+
+        CheckpointLoaderSimple / CheckpointLoader emit CLIP on slot 1.
+        LoraLoader emits CLIP on slot 1.
+        Dedicated CLIPLoader / DualCLIPLoader emit on slot 0.
+        Falls back to scanning existing "clip" consumers for evidence.
+        """
+        cls = wm.workflow.get(node_id, {}).get("class_type", "")
+        if cls in ("CheckpointLoaderSimple", "CheckpointLoader", "LoraLoader"):
+            return 1
+        if cls in ("CLIPLoader", "DualCLIPLoader"):
+            return 0
+        # Heuristic: look at what existing nodes read as "clip" from this node
+        for node in wm.workflow.values():
+            for inp_name, inp_val in node.get("inputs", {}).items():
+                if (
+                    inp_name == "clip"
+                    and isinstance(inp_val, list)
+                    and len(inp_val) == 2
+                    and str(inp_val[0]) == node_id
+                ):
+                    return int(inp_val[1])
+        return 0
+
     def _add_lora(self, wm: WorkflowManager, inputs: dict) -> str:
         lora_name = inputs["lora_name"]
         model_nid = str(inputs["model_node_id"])
@@ -795,11 +939,17 @@ class ClawAgent:
         sm = float(inputs.get("strength_model", 0.8))
         sc = float(inputs.get("strength_clip", 0.8))
 
+        # Determine correct output slots for the source nodes.
+        # CheckpointLoaderSimple: slot 0=MODEL, slot 1=CLIP, slot 2=VAE
+        # LoraLoader / UNETLoader / CLIPLoader: slot 0 is the primary output
+        model_slot = 0
+        clip_slot = self._detect_clip_slot(wm, clip_nid)
+
         lora_nid = wm.add_node(
             "LoraLoader",
             f"LoRA: {lora_name[:30]}",
-            model=[model_nid, 0],
-            clip=[clip_nid, 0],
+            model=[model_nid, model_slot],
+            clip=[clip_nid, clip_slot],
             lora_name=lora_name,
             strength_model=sm,
             strength_clip=sc,
@@ -813,10 +963,10 @@ class ClawAgent:
             for inp_name, inp_val in list(node.get("inputs", {}).items()):
                 if isinstance(inp_val, list) and len(inp_val) == 2:
                     src_id, src_idx = str(inp_val[0]), inp_val[1]
-                    if src_id == model_nid and src_idx == 0 and inp_name == "model":
+                    if src_id == model_nid and src_idx == model_slot and inp_name == "model":
                         wm.workflow[nid]["inputs"][inp_name] = [lora_nid, 0]
                         rewired_model.append(f"{nid}.{inp_name}")
-                    if src_id == clip_nid and src_idx == 0 and inp_name == "clip":
+                    if src_id == clip_nid and src_idx == clip_slot and inp_name == "clip":
                         wm.workflow[nid]["inputs"][inp_name] = [lora_nid, 1]
                         rewired_clip.append(f"{nid}.{inp_name}")
 
@@ -1102,6 +1252,37 @@ class ClawAgent:
             except Exception:
                 pass
 
+    @staticmethod
+    def _extract_structural_hints(feedback: str) -> str:
+        """Parse verifier feedback for structural upgrade directives.
+
+        Scans for fix_strategy keywords (inject_lora_*, add_controlnet_*,
+        add_hires_fix, add_inpaint_pass) and returns a formatted list of
+        required structural actions.  Returns empty string when only
+        prompt-level fixes are suggested.
+        """
+        _STRUCTURAL_KEYWORDS = {
+            "inject_lora_detail": '→ `read_skill("lora-enhancement")` then `add_lora_loader` (detail LoRA)',
+            "inject_lora_style": '→ `read_skill("lora-enhancement")` then `add_lora_loader` (style LoRA)',
+            "inject_lora_anatomy": '→ `read_skill("lora-enhancement")` then `add_lora_loader` (anatomy LoRA)',
+            "inject_lora_lighting": '→ `read_skill("lora-enhancement")` then `add_lora_loader` (lighting LoRA)',
+            "add_controlnet_canny": '→ `read_skill("controlnet-control")` then `add_controlnet` (canny edge)',
+            "add_controlnet_depth": '→ `read_skill("controlnet-control")` then `add_controlnet` (depth map)',
+            "add_controlnet_normal": '→ `read_skill("controlnet-control")` then `add_controlnet` (normal map)',
+            "add_controlnet_pose": '→ `read_skill("controlnet-control")` then `add_controlnet` (pose)',
+            "add_controlnet_tile": '→ `read_skill("controlnet-control")` then `add_controlnet` (tile)',
+            "add_controlnet_seg": '→ `read_skill("controlnet-control")` then `add_controlnet` (segmentation)',
+            "add_hires_fix": '→ `read_skill("hires-fix")` then `add_hires_fix`',
+            "add_inpaint_pass": "→ `add_inpaint_pass` for the affected region",
+            "add_ip_adapter": "→ consider IP-Adapter if available",
+        }
+        found = []
+        feedback_lower = feedback.lower()
+        for kw, action in _STRUCTURAL_KEYWORDS.items():
+            if kw in feedback_lower:
+                found.append(f"  • `{kw}` {action}")
+        return "\n".join(found)
+
     def _build_user_message(
         self,
         original_prompt: str,
@@ -1212,10 +1393,22 @@ class ClawAgent:
                     "over structural or technical changes. Address their feedback directly."
                 )
             else:
-                parts.append(
-                    f"## Verifier Feedback (previous iteration)\n{verifier_feedback}\n\n"
+                structural_hints = self._extract_structural_hints(verifier_feedback)
+                directive = (
                     "Use the evolution_suggestions and region_issues above to decide which "
                     "structural upgrade to apply this round."
+                )
+                if structural_hints:
+                    directive = (
+                        f"**REQUIRED structural upgrades** (from verifier fix_strategies):\n"
+                        f"{structural_hints}\n\n"
+                        "You MUST attempt these structural changes — do NOT fall back to "
+                        "prompt-only refinement. Call `query_available_models` first to check "
+                        "availability, then `read_skill` for the matching skill, then apply."
+                    )
+                parts.append(
+                    f"## Verifier Feedback (previous iteration)\n{verifier_feedback}\n\n"
+                    f"{directive}"
                 )
         if memory_summary:
             parts.append(f"## Memory / Past Attempts\n{memory_summary}")

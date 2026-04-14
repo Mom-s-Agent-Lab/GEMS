@@ -12,8 +12,11 @@ Public API
 from pathlib import Path
 
 from .client import ComfyClient
+from .evolve import SkillEvolver
 from .harness import ClawHarness, HarnessConfig
 from .memory import ClawMemory
+from .skill_store import SkillStore
+from .stage_router import StageRouter
 from .sync_server import SyncServer
 from .verifier import ClawVerifier, RegionIssue, VerifierResult
 from .workflow import WorkflowManager
@@ -32,6 +35,9 @@ __all__ = [
     "ClawVerifier",
     "VerifierResult",
     "RegionIssue",
+    "SkillEvolver",
+    "SkillStore",
+    "StageRouter",
     "SyncServer",
     "WorkflowManager",
     "custom_node_path",

@@ -28,6 +28,9 @@ def _make_agent(
     agent.on_agent_event = None
     agent.max_tool_rounds = 10
     agent.pinned_image_model = pinned_image_model
+    from comfyclaw.stage_router import StageRouter
+
+    agent.stage_router = StageRouter(enabled=False)
     return agent
 
 
