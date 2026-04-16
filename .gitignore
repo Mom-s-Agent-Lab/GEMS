@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+infer_results/
+results/
+eval/*/outputs/
+eval/*/results/
+
+.DS_Store
+.env
+.env.*
+.idea/
+.vscode/

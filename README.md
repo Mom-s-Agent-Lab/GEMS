@@ -16,7 +16,16 @@
 
 ### Project Overview
 
+GEMS ships with two interchangeable image-generation lines — both share
+the same decompose / verify / refine / skill-routing pipeline, only the
+`generate()` backend differs:
 
+1. **HTTP line** (`agent/GEMS.py` + `infer.py`) — POSTs the prompt to a
+   dedicated FastAPI server (`qwen_image.py` / `z_image.py`).
+2. **ComfyUI line** (`agent/comfy_gems.py` + `infer_comfy.py`) — builds
+   a full ComfyUI API-format workflow for the chosen model (Qwen-Image-2512,
+   Z-Image-Turbo, FLUX.2 [klein] 9B, or LongCat-Image) and submits it
+   to a running ComfyUI server. See [Infer (ComfyUI line)](#infer-comfyui-line).
 
 ```text
 GEMS/
@@ -30,14 +39,23 @@ GEMS/
 │   │   │   └── SKILL.md
 │   │   ├── creative_drawing
 │   │   │   └── SKILL.md
+│   │   ├── qwen-image-2512     # ComfyUI model skills
+│   │   ├── z-image-turbo
+│   │   ├── flux-klein-9b
+│   │   ├── longcat-image
 │   │   └── ...
 │   ├── base_agent.py           # base Interfaces
-│   └── GEMS.py                 # core implementation
+│   ├── GEMS.py                 # core implementation (HTTP line)
+│   ├── comfy_gems.py           # ComfyUI line (inherits GEMS)
+│   ├── comfy_client.py         # ComfyUI HTTP client
+│   └── comfy_workflow.py       # ComfyUI workflow templates
 ├── eval/                       # evalation for tasks
 │   ├── ArtiMuse/
 │   ├── CREA/
 │   ├── GenEval2.py
 │   └── ...
+├── infer.py                    # HTTP line demo
+├── infer_comfy.py              # ComfyUI line demo
 └── ...
 ```
 
@@ -144,6 +162,88 @@ Output is saved to `infer_results/test_output.png`.
 
 ---
 
+### Infer (ComfyUI line)
+
+GEMS ships a second generation line that produces **ComfyUI API-format
+workflows** and submits them to a running ComfyUI server.  The
+decompose → generate → verify → refine loop from the HTTP line is
+preserved verbatim (inherited from `GEMS`) — only `generate()` is
+replaced: instead of `POST /generate?prompt=...` it builds a full
+workflow dict, submits to ComfyUI's `/prompt`, polls `/history`, and
+downloads the output via `/view`.
+
+**Supported models (one base-workflow template each):**
+
+| Model | `model=` value | Topology highlights |
+|---|---|---|
+| Qwen-Image-2512 | `qwen-image-2512` | 20B MMDiT, FP8; `ModelSamplingAuraFlow` → `KSampler` (steps=50, cfg=4.0, euler/simple); 1328×1328 |
+| Z-Image-Turbo | `z-image-turbo` | 6B S3-DiT, BF16; `ConditioningZeroOut` for negatives; `KSampler` (steps=8, cfg=1, res_multistep); 1024×1024 |
+| FLUX.2 [klein] 9B | `flux-klein-9b` | `SamplerCustomAdvanced` + `CFGGuider` + `Flux2Scheduler` + `RandomNoise` + `KSamplerSelect`; 4 steps; 1024×1024 |
+| LongCat-Image | `longcat-image` | 6B DiT, BF16; `FluxGuidance` on both positive/negative + `CFGNorm`; `KSampler` (steps=20, cfg=4); 1024×1024 |
+
+Each model has a corresponding `SKILL.md` under `agent/skills/<model>/`
+(imported as-is from `comfyclaw`, YAML-frontmatter format) so the
+`SkillManager` / `plan()` step can route the user's prompt through the
+model's own recipe.
+
+**Prerequisites:**
+
+* A reachable ComfyUI server (version with the right custom nodes; we
+  tested against ComfyUI 0.19+ with native `QwenImage*` / `FluxGuidance`
+  / `CFGNorm` / `Flux2Scheduler` support).
+* Model weights / text encoders / VAE for the chosen model installed at
+  the standard `ComfyUI/models/...` paths — the exact filenames expected
+  by each workflow template are listed in the corresponding
+  `agent/skills/<model>/SKILL.md`.
+* `ANTHROPIC_API_KEY` (or any other LiteLLM-supported provider, see
+  `agent/base_agent.py`) for the MLLM used by decompose / verify /
+  refine.
+
+**Quick run:**
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+export COMFYUI_SERVER=127.0.0.1:8188      # host:port of ComfyUI
+export GEMS_COMFY_MODEL=z-image-turbo     # or qwen-image-2512 / flux-klein-9b / longcat-image
+export GEMS_MAX_ITERATIONS=5
+python infer_comfy.py
+```
+
+Output:
+
+* `infer_results/test_output_comfy.png` — final (best) image
+* `infer_results/workflows/workflow_NNN.json` — every workflow submitted
+  this run, pretty-printed for inspection / replay in the ComfyUI UI
+
+**Programmatic use:**
+
+```python
+from agent.comfy_gems import ComfyGEMS
+
+agent = ComfyGEMS(
+    model="qwen-image-2512",           # or alias: "qwen", "z-image", "flux-klein", "longcat", ...
+    comfyui_server="127.0.0.1:8188",
+    max_iterations=5,
+    workflow_log_dir="run_workflows",  # optional: dump every submitted workflow
+    seed=42,                           # optional: pin KSampler / RandomNoise seed
+    default_negative=None,             # optional: override per-model negative prompt
+    workflow_timeout=600,              # optional: seconds to wait for one ComfyUI job
+)
+image_bytes = agent.run({"prompt": "a cozy cabin in a snowy pine forest at dusk"})
+
+# Build (but don't submit) the workflow, e.g. for offline inspection:
+wf_dict = agent.build_workflow("a cozy cabin in a snowy pine forest at dusk")
+```
+
+**Scope of this line (by design):** only `generate()` is new — the
+refine loop still edits only the positive prompt, verification is still
+the stock MLLM yes/no decomposition, and the workflow itself is NOT
+topologically evolved (no LoRA / ControlNet auto-insertion, no sampler
+LLM-tuning, no repair loop).  Use `comfyclaw` if you want topology
+evolution on top of ComfyUI.
+
+---
+
 ### Evaluation
 
 Images are first generated with GEMS, then scored with task-specific methods.
@@ -207,18 +307,38 @@ agent/skills/
 └── <skill_id>/             # Unique folder name (used as Skill ID)
     └── SKILL.md            # Skill definition file
 ```
-The `SkillManager` parses `SKILL.md` using regular expressions. To ensure your skill is recognized correctly, please follow this template:
+
+`SkillManager` accepts **either** of the two formats below (auto-detected):
+
+**Format A — legacy GEMS template:**
 
 ```markdown
 # Skill: <Name>
 
 ## Description
-Provide a concise summary of what this skill does. 
+Provide a concise summary of what this skill does.
 
 ## Instructions
-Provide detailed domain-specific guidance, prompts, or constraints here. 
+Provide detailed domain-specific guidance, prompts, or constraints here.
 The code will capture all content remaining below this header.
 ```
+
+**Format B — Agent-Skills YAML frontmatter** (used by the ComfyUI-line
+model skills imported from comfyclaw):
+
+```markdown
+---
+name: <skill-id>
+description: >-
+  One-or-more-line description of the skill.
+---
+
+The entire body below the closing `---` becomes the skill's
+instructions.
+```
+
+Both formats surface the folder name as the `SKILL_ID` in the planner
+manifest.
 
 ### Citation
 If you find our work useful, please consider citing:
