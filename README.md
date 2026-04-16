@@ -278,6 +278,69 @@ wf_dict = agent.build_workflow("a cozy cabin in a snowy pine forest at dusk")
 | `Value not in list: unet_name` | Weight file not placed under `ComfyUI/models/unet/` with the exact filename shown in the table above. |
 | Generation hangs | Raise `workflow_timeout`, or check ComfyUI logs for OOM / VAE decode errors. |
 
+### 4b. Run a batch of prompts in parallel
+
+`infer_comfy.py` is a single-prompt demo.  For real experiments use
+`run_comfy_batch.py`, which shards prompts across one or more ComfyUI
+servers and/or multiple client workers per server (each worker owns its
+own `ComfyGEMS` instance, so the full decompose / verify / refine loop
+runs independently per prompt).
+
+```bash
+# 1 ComfyUI server, 2 client workers overlapping MLLM + ComfyUI:
+python run_comfy_batch.py \
+    --prompts prompts.jsonl \
+    --output-dir results/my_run \
+    --model z-image-turbo \
+    --comfyui-servers 127.0.0.1:8188 \
+    --workers-per-server 2 \
+    --max-iterations 5
+
+# 4 ComfyUI servers (one worker each, auto round-robin):
+python run_comfy_batch.py \
+    --prompts prompts.jsonl \
+    --output-dir results/my_run \
+    --model qwen-image-2512 \
+    --comfyui-servers host1:8188,host2:8188,host3:8188,host4:8188
+```
+
+**Input** (`--prompts`): a `.jsonl` file with one `{"prompt": "..."}` per
+line (extra fields are forwarded to the agent), or a plain `.txt` file
+with one prompt per non-empty line.
+
+**Output layout:**
+
+```text
+results/my_run/
+├── index.json                  # {prompt: rel_path} — enables --resume
+├── images/
+│   ├── prompt_00000.png        # best image per prompt
+│   └── ...
+├── traces/
+│   └── prompt_00000/
+│       ├── trace.json
+│       ├── best.png
+│       ├── round_1.png ...     # if --save-all-rounds
+│       └── workflows/          # one submitted workflow per iteration
+└── logs/
+    ├── worker_0.log            # stdout/stderr per worker (isolated)
+    └── ...
+```
+
+**Resume:** re-running with the same `--output-dir` skips any prompt
+already listed in `index.json`.  `index.json` is flushed to disk after
+every successful prompt, so a crash/OOM loses at most one in-flight
+item per worker.
+
+**Notes on parallelism:**
+
+- A single ComfyUI server serialises its job queue, so raising
+  `--workers-per-server` above 1 *won't* make image generation faster,
+  but it **does** overlap MLLM HTTP latency (decompose / verify / refine)
+  with ComfyUI work — usually a 1.3–1.8× speed-up on short prompts.
+- For true parallelism, launch N ComfyUI servers (different GPUs /
+  hosts) and pass them all to `--comfyui-servers`.
+
 ### Scope (by design)
 
 Only `generate()` is new. The refine loop still edits only the **positive prompt**,
