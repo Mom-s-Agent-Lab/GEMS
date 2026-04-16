@@ -12,8 +12,24 @@ Benchmark and experiment scripts for evaluating ComfyClaw against baselines.
   git clone https://github.com/facebookresearch/GenEval2.git ../GenEval2
   ```
   Override the default path with the `GENEVAL2_DATA` env var if needed
-- Model checkpoints installed in ComfyUI's `models/` directories
-- Run experiment `N_PROMPTS=800 python experiments/claw_qwen_benchmark.py --max-iterations 5 --evolve-batch-size 5 --parallel 2`
+- Qwen Image model checkpoints — download from [Comfy-Org/Qwen-Image_ComfyUI](https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI) into your ComfyUI `models/` directories:
+  ```bash
+  # Set this to your ComfyUI installation path
+  COMFYUI_DIR=/path/to/ComfyUI
+
+  # Diffusion model (~40.9 GB)
+  wget -P "$COMFYUI_DIR/models/diffusion_models/" \
+    https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/diffusion_models/qwen_image_bf16.safetensors
+
+  # Text encoder (~16.6 GB)
+  wget -P "$COMFYUI_DIR/models/text_encoders/" \
+    https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b.safetensors
+
+  # VAE
+  wget -P "$COMFYUI_DIR/models/vae/" \
+    https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors
+  ```
+- Run experiment `source .venv/bin/activate` then `N_PROMPTS=800 python experiments/claw_qwen_benchmark.py --max-iterations 5 --evolve-batch-size 5 --parallel 2`
 
 ## Scripts
 
