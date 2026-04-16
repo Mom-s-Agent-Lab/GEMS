@@ -20,25 +20,25 @@ Benchmark and experiment scripts for evaluating ComfyClaw against baselines.
   # Diffusion model (~40.9 GB)
   hf download Comfy-Org/Qwen-Image_ComfyUI \
     split_files/diffusion_models/qwen_image_bf16.safetensors \
-    --local-dir "$COMFYUI_DIR/models"
+    --local-dir /tmp/qwen-image
 
   # Text encoder (~16.6 GB)
   hf download Comfy-Org/Qwen-Image_ComfyUI \
     split_files/text_encoders/qwen_2.5_vl_7b.safetensors \
-    --local-dir "$COMFYUI_DIR/models"
+    --local-dir /tmp/qwen-image
 
-  # VAE
+  # VAE (~243 MB)
   hf download Comfy-Org/Qwen-Image_ComfyUI \
     split_files/vae/qwen_image_vae.safetensors \
-    --local-dir "$COMFYUI_DIR/models"
+    --local-dir /tmp/qwen-image
+
+  # Move into ComfyUI's expected directories
+  mv /tmp/qwen-image/split_files/diffusion_models/* "$COMFYUI_DIR/models/diffusion_models/"
+  mv /tmp/qwen-image/split_files/text_encoders/*    "$COMFYUI_DIR/models/text_encoders/"
+  mv /tmp/qwen-image/split_files/vae/*               "$COMFYUI_DIR/models/vae/"
+  rm -r /tmp/qwen-image
   ```
-  Files will land under `models/split_files/{diffusion_models,text_encoders,vae}/`. Move or symlink them to the standard ComfyUI layout if needed:
-  ```bash
-  mv "$COMFYUI_DIR/models/split_files/diffusion_models/"* "$COMFYUI_DIR/models/diffusion_models/"
-  mv "$COMFYUI_DIR/models/split_files/text_encoders/"*    "$COMFYUI_DIR/models/text_encoders/"
-  mv "$COMFYUI_DIR/models/split_files/vae/"*               "$COMFYUI_DIR/models/vae/"
-  rm -r "$COMFYUI_DIR/models/split_files"
-  ```
+  Then restart ComfyUI so it picks up the new models.
 - Run experiment `source .venv/bin/activate` then `N_PROMPTS=800 python experiments/claw_qwen_benchmark.py --max-iterations 5 --evolve-batch-size 5 --parallel 2`
 
 ## Scripts

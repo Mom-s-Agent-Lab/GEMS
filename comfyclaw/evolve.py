@@ -291,10 +291,11 @@ class SkillEvolver:
                 proposal.pre_score = pre_mean
                 mutations.append(proposal)
 
-        # Step 3: Generate test prompts for each mutation
-        for mutation in mutations:
-            test_prompts = self._generate_test_prompts(mutation, clusters)
-            mutation.test_prompts = test_prompts
+        # Step 3: Generate test prompts (only useful when validation is available)
+        if run_validation_fn:
+            for mutation in mutations:
+                test_prompts = self._generate_test_prompts(mutation, clusters)
+                mutation.test_prompts = test_prompts
 
         # Step 4: Apply and validate each mutation
         accepted = 0
@@ -470,6 +471,20 @@ class SkillEvolver:
     # Private: mutation proposal
     # ------------------------------------------------------------------
 
+    def _get_recently_mutated_skills(self) -> list[str]:
+        """Return skill names that have been mutated, ordered by version count (most first)."""
+        versions_dir = self.evolved_skills_dir / ".versions"
+        if not versions_dir.exists():
+            return []
+        from collections import Counter
+        counts: Counter[str] = Counter()
+        for f in versions_dir.iterdir():
+            if f.suffix == ".md":
+                parts = f.stem.split("__")
+                if parts:
+                    counts[parts[0]] += 1
+        return [name for name, _ in counts.most_common()]
+
     def _propose_mutation(self, cluster: FailureCluster) -> MutationProposal | None:
         """Ask the LLM to propose a skill mutation for a failure cluster (with retry)."""
         manifest = "\n".join(
@@ -487,10 +502,22 @@ class SkillEvolver:
             "affected_prompts": cluster.affected_prompts[:5],
         }, indent=2)
 
+        recently_mutated = self._get_recently_mutated_skills()
+        diversity_hint = ""
+        if recently_mutated:
+            diversity_hint = (
+                f"\n\nDiversity guidance: These skills have already been mutated heavily: "
+                f"{', '.join(recently_mutated)}. "
+                "Prefer creating a NEW skill or updating a DIFFERENT existing skill "
+                "unless this cluster is clearly about the same narrow topic. "
+                "Broader coverage across different skills is more valuable than "
+                "repeated refinement of one skill."
+            )
+
         prompt = _PROPOSE_MUTATION_PROMPT.format(
             cluster_json=cluster_json,
             skills_manifest=manifest or "(no skills)",
-        )
+        ) + diversity_hint
 
         data = self._llm_json_call(prompt, max_tokens=4000, expect_array=False)
         if data is None:

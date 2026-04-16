@@ -972,15 +972,14 @@ class ClawHarness:
     def _summarize_experience(
         self, prompt: str, passed: list[str], failed: list[str], rationale: str
     ) -> str:
-        try:
-            msg = (
-                f"Summarize in ≤80 words. Focus on what worked, failed, and the key lesson.\n\n"
-                f"Prompt: {prompt}\nPassed: {', '.join(passed) or 'none'}\n"
-                f"Failed: {', '.join(failed) or 'none'}\nAgent rationale: {rationale}"
-            )
-            return self._verifier.complete(msg, max_tokens=200)
-        except Exception as exc:
-            return f"Summary unavailable: {exc}"
+        parts = [f"Prompt: {prompt}"]
+        if passed:
+            parts.append(f"Passed ({len(passed)}): {'; '.join(passed)}")
+        if failed:
+            parts.append(f"Failed ({len(failed)}): {'; '.join(failed)}")
+        if rationale:
+            parts.append(f"Rationale: {rationale}")
+        return " | ".join(parts)
 
     def _print_summary(self, best_score: float) -> None:
         print("\n[ClawHarness] ── Evolution Summary ──")

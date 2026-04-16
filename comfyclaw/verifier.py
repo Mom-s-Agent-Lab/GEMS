@@ -91,6 +91,17 @@ _DECOMPOSE_PROMPT = (
     "Respond ONLY with a JSON array of question strings.\n\nPrompt: {prompt}"
 )
 
+_DECOMPOSE_AND_CHECK_PROMPT = """\
+You are verifying a generated image against its prompt.
+
+1. Decompose the prompt into specific, observable visual requirements.
+2. For each requirement, write a yes/no question and answer it based on the image.
+
+Respond ONLY with a JSON array of objects:
+[{{"question": "<yes/no question>", "answer": "yes" or "no"}}]
+
+Prompt: {prompt}"""
+
 _DETAILED_ANALYSIS_PROMPT = """\
 You are an expert image quality analyst and ComfyUI workflow engineer.
 
@@ -185,6 +196,7 @@ class ClawVerifier:
         self.max_workers = max_workers
         self.multi_scale = multi_scale
         self.weighted_requirements = weighted_requirements
+        self._decomposition_cache: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -373,6 +385,10 @@ class ClawVerifier:
         return (resp.choices[0].message.content or "").strip()
 
     def _decompose_prompt(self, prompt: str) -> list[str]:
+        cached = self._decomposition_cache.get(prompt)
+        if cached is not None:
+            return cached
+
         resp = litellm.completion(
             model=self.model,
             max_tokens=1024,
@@ -381,9 +397,52 @@ class ClawVerifier:
         text = (resp.choices[0].message.content or "").strip()
         try:
             m = re.search(r"\[.*\]", text, re.DOTALL)
-            return json.loads(m.group() if m else text)
+            questions = json.loads(m.group() if m else text)
         except Exception:
-            return [ln.strip() for ln in text.splitlines() if "?" in ln]
+            questions = [ln.strip() for ln in text.splitlines() if "?" in ln]
+
+        self._decomposition_cache[prompt] = questions
+        return questions
+
+    def _decompose_and_check(
+        self,
+        b64_data: str,
+        media_type: str,
+        prompt: str,
+    ) -> list[RequirementCheck]:
+        """Decompose the prompt AND check each requirement in a single vision LLM call."""
+        image_block = {
+            "type": "image_url",
+            "image_url": {"url": f"data:{media_type};base64,{b64_data}"},
+        }
+        try:
+            resp = litellm.completion(
+                model=self.model,
+                max_tokens=1024,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            image_block,
+                            {
+                                "type": "text",
+                                "text": _DECOMPOSE_AND_CHECK_PROMPT.format(prompt=prompt),
+                            },
+                        ],
+                    }
+                ],
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            m = re.search(r"\[.*\]", text, re.DOTALL)
+            items = json.loads(m.group() if m else text)
+            checks = []
+            for item in items:
+                q = item.get("question", "")
+                a = str(item.get("answer", "no")).strip().lower()
+                checks.append(RequirementCheck(q, a, "yes" in a and "no" not in a))
+            return checks
+        except Exception:
+            return []
 
     def _check_requirements(
         self,

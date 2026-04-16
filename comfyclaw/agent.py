@@ -1427,13 +1427,38 @@ class ClawAgent:
                 if all(kw in model_lower for kw in skill_keywords if len(kw) > 2):
                     if skill_name not in relevant:
                         relevant.append(skill_name)
+        # Pre-load the model-specific skill body directly to avoid a
+        # read_skill round-trip that the agent would make on every invocation.
+        preloaded_skill: str | None = None
+        model_skill_name: str | None = None
+        if is_qwen:
+            model_skill_name = "qwen-image-2512"
+        elif active_model:
+            model_lower = active_model.lower()
+            if "dreamshaper" in model_lower and "lcm" in model_lower:
+                model_skill_name = "dreamshaper8-lcm"
+
+        if model_skill_name:
+            try:
+                preloaded_skill = self.skill_manager.get_body(model_skill_name)
+            except KeyError:
+                preloaded_skill = None
+
+        if preloaded_skill:
+            parts.append(
+                f"## Pre-loaded Skill: {model_skill_name}\n"
+                "The following skill instructions are pre-loaded for your active model. "
+                "You do NOT need to call read_skill for this — apply these instructions directly.\n\n"
+                f"{preloaded_skill}"
+            )
+            if model_skill_name in relevant:
+                relevant.remove(model_skill_name)
+
         if relevant:
             hint = ", ".join(sorted(relevant))
             parts.append(
                 f"## Suggested Skills\nThese skills may be relevant: {hint}\n"
-                "Call read_skill(<name>) to load full instructions before applying.\n"
-                '**If the active model is an LCM variant, read_skill("dreamshaper8-lcm") FIRST.**\n'
-                '**If the workflow contains QwenImageModelLoader, read_skill("qwen-image-2512") FIRST.**'
+                "Call read_skill(<name>) to load full instructions before applying."
             )
 
         if verifier_feedback:

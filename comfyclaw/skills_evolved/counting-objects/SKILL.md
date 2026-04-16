@@ -1,44 +1,56 @@
 ---
 name: counting-objects
 description: >-
-  Restructure prompts to enforce precise object counts (especially 4-7 items) using numerical emphasis, layout specification, and regional prompting for mixed object scenes.
+  Enforce accurate object counts (2-10+) through count-tiered strategies: regional prompting for 2-3 objects, explicit grid anchoring for 4-6, and repetition+spatial distribution for 7+.
 license: MIT
 metadata:
   cluster: "counting_multiple_objects"
   origin: "self-evolve"
 ---
 
-# Counting Objects
+# counting-objects
 
-Diffusion models fail at counting beyond 2-3 items due to token-level numeracy limits. For counts ≥4, explicit spatial layout and emphasis are required.
+## Purpose
+Generate exact counts of identical or similar objects when the user specifies a number (two, three, four, five, six, seven, etc.). Diffusion models default to 1-2 objects and hallucinate counts above 3 without structural intervention.
 
 ## When to Use
-- User specifies exact counts: "four rabbits", "seven croissants", "six cars"
-- Counts of 4 or more objects (success rate drops dramatically above 3)
-- Mixed object scenes: "four rabbits AND a sheep", "five bears AND a donut"
+- User prompt contains number words: "two cats", "four rabbits", "five apples", "seven croissants", "ten stars"
+- Verifier reports wrong object count
+- fix_strategy contains "enforce_count" or "add_regional_prompt"
 
-## Technique
+## Strategy by Count Range
 
-### For counts 4-7:
-1. **Expand the number into emphatic tokens**: "four" → "(four:1.4), (4:1.3), exactly four"
-2. **Add explicit layout language**: "arranged in a row", "spread across the scene", "clustered together", "in a grid pattern"
-3. **Repeat the object noun with count**: "four brown monkeys, 4 monkeys, four of them"
-4. **Use negative prompt**: "three monkeys, five monkeys, wrong count"
+### 2-3 Objects: Regional Prompting
+- Use regional-control skill with explicit LEFT/RIGHT or spatial anchors
+- Example: "four rabbits" → "REGION_LEFT: two brown rabbits, REGION_RIGHT: two brown rabbits"
 
-### For mixed objects (e.g., "four rabbits and a sheep"):
-1. **Trigger regional-control skill** to assign separate regions
-2. **Split into**: "(four rabbits:1.4), exactly 4 rabbits | (one sheep:1.3), single sheep"
-3. **Use list syntax**: "four rabbits arranged in foreground, one sheep in background"
+### 4-6 Objects: Grid Anchoring + Repetition
+- Use regional-control with EXPLICIT grid layout (top-left, top-right, bottom-left, bottom-right, center-left, center-right)
+- Add count-specific emphasis: (four rabbits:1.4), exactly four, 4 rabbits
+- Negative prompt: "one rabbit, two rabbits, three rabbits, five rabbits"
+- Example: "six cars" → "REGION_TOP: three red cars in a row, REGION_BOTTOM: three red cars in a row, (exactly six cars:1.3)"
 
-### Example transformations:
-- "seven green croissants" → "(seven:1.4) (7:1.3) green croissants, exactly seven croissants arranged in a row, (green color:1.2)"
-- "four rabbits and a sheep" → "(four white rabbits:1.4), exactly 4 rabbits in foreground | (one sheep:1.3), single sheep in background" + trigger regional-control
-- "six cars and a kangaroo" → "(six cars:1.4), 6 cars spread across scene | (one kangaroo:1.3), single kangaroo" + trigger regional-control
+### 7+ Objects: Spatial Distribution + Strong Repetition
+- Use scattered/crowd composition keywords: "group of seven", "crowd of", "collection of", "array of"
+- Repeat object noun 3-4 times: "seven green croissants, croissant, croissant, croissant, multiple croissants"
+- Add layout hints: "arranged in a circle", "scattered across the scene", "in rows"
+- High emphasis: (seven croissants:1.5)
+- Negative: "one, two, three, four, five, six, eight, nine"
 
-## Integration
-- Always combine with **regional-control** when multiple object types are present
-- Always combine with **unusual-attributes** if colors/materials are atypical
-- Add to negative prompt: common miscounts ("three", "five" when asking for four)
+## Multi-Category Scenes
+When count appears with multiple object types ("four rabbits and a sheep"):
+1. Apply counting strategy to the plural object (four rabbits)
+2. Use multi-category skill to isolate categories
+3. Example: "REGION_LEFT: four brown rabbits, rabbit, rabbit, (exactly four rabbits:1.3) | REGION_RIGHT: one white sheep, single sheep"
 
-## Node impact
-Modifies CLIPTextEncode positive/negative prompts only. No topology changes unless regional-control is triggered.
+## Node Instructions
+- Always use regional-control or CLIPTextEncodeSDXLRefiner with separate conditionings
+- For 4+ objects, increase CFG to 8-9 for stronger prompt adherence
+- Consider hires-fix to sharpen individual object details
+- Never rely on base prompt alone for counts above 3
+
+## Critical Rules
+- Counts of 4+ REQUIRE regional/grid layout — prompting alone fails
+- Always include negative prompts with wrong counts
+- Repeat the object noun proportional to count (4 objects = 2-3 repetitions, 7+ = 3-4 repetitions)
+- Use emphasis syntax (count:1.3-1.5) for all counts
