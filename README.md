@@ -89,6 +89,16 @@ Then set `mllm_url` in `infer.py` and switch `base_agent.py` back to using the O
 
 GEMS supports [Qwen-Image-2512](https://huggingface.co/Qwen/Qwen-Image-2512) and [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) as generators.
 
+**Download model weights:**
+
+```bash
+# Qwen-Image-2512
+huggingface-cli download Qwen/Qwen-Image-2512 --local-dir /path/to/Qwen-Image-2512
+
+# Z-Image-Turbo (faster alternative)
+huggingface-cli download Tongyi-MAI/Z-Image-Turbo --local-dir /path/to/Z-Image-Turbo
+```
+
 **Start the Qwen-Image server:**
 
 ```bash
@@ -139,6 +149,18 @@ Output is saved to `infer_results/test_output.png`.
 Images are first generated with GEMS, then scored with task-specific methods.
 
 **GenEval2:**
+
+First, download the benchmark data:
+
+```bash
+# Option A — from Hugging Face
+huggingface-cli download Jialuo21/GenEval2 --repo-type dataset --local-dir /path/to/GenEval2
+
+# Option B — from GitHub
+git clone https://github.com/facebookresearch/GenEval2.git /path/to/GenEval2
+```
+
+Then set `DATA_PATH` and `OUTPUT_DIR` at the top of `eval/GenEval2.py` to point to your local copy, and run:
 
 ```bash
 python eval/GenEval2.py \

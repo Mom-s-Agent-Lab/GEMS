@@ -10,11 +10,11 @@ import io
 import uvicorn
 import asyncio
 
-NUM_GPUS = 8
+NUM_GPUS = int(os.environ.get("NUM_GPUS", 1))
 RESOLUTION = 1024
 STEPS = 9
 CFG_SCALE = 0.0
-MODEL_PATH = "path/to/Z-Image-Turbo"
+MODEL_PATH = os.environ.get("MODEL_PATH", "path/to/Z-Image-Turbo")
 PORT = 8001
 
 app = FastAPI(title="Multi-GPU Image Gen API")
