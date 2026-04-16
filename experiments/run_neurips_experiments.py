@@ -36,6 +36,20 @@ log = logging.getLogger(__name__)
 SKILLS_DIR = str(Path(__file__).resolve().parent.parent / "comfyclaw" / "skills")
 
 
+def _write_evolution_metadata(evolved_dir: str, **kwargs: object) -> None:
+    """Write or update a metadata JSON in the evolved skills directory."""
+    meta_path = os.path.join(evolved_dir, "evolution_metadata.json")
+    os.makedirs(evolved_dir, exist_ok=True)
+    meta: dict = {}
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            meta = json.load(f)
+    meta.update(kwargs)
+    meta["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+
+
 def run_benchmark(
     suite: str,
     name: str,
@@ -91,6 +105,11 @@ def run_evolution(
         results = json.load(f)
 
     evolved_dir = str(Path(skills_dir).parent / "skills_evolved")
+    _write_evolution_metadata(
+        evolved_dir,
+        benchmark="run_neurips_experiments",
+        agent_model=model,
+    )
 
     evolver = SkillEvolver(
         evolved_skills_dir=evolved_dir,

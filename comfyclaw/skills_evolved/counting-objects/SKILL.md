@@ -1,56 +1,89 @@
 ---
 name: counting-objects
 description: >-
-  Enforce accurate object counts (2-10+) through count-tiered strategies: regional prompting for 2-3 objects, explicit grid anchoring for 4-6, and repetition+spatial distribution for 7+.
+  Enforce accurate object counts (2-10+) through mandatory regional prompting with explicit per-object spatial grid allocation, individual conditioning per instance, and count-verification negative prompts.
 license: MIT
 metadata:
   cluster: "counting_multiple_objects"
   origin: "self-evolve"
 ---
 
-# counting-objects
-
-## Purpose
-Generate exact counts of identical or similar objects when the user specifies a number (two, three, four, five, six, seven, etc.). Diffusion models default to 1-2 objects and hallucinate counts above 3 without structural intervention.
+# Counting Objects Skill
 
 ## When to Use
-- User prompt contains number words: "two cats", "four rabbits", "five apples", "seven croissants", "ten stars"
-- Verifier reports wrong object count
-- fix_strategy contains "enforce_count" or "add_regional_prompt"
+Trigger when the prompt contains explicit counts of 2 or more identical/similar objects:
+- "three cats", "four rabbits", "seven croissants", "six trucks"
+- ANY numeric word (two, three, four, five, six, seven, eight, nine, ten) + plural noun
+- "multiple", "several", "many" + specific object type
 
-## Strategy by Count Range
+## Core Strategy
+Diffusion models collapse multiple identical objects into fewer instances. Combat this through:
+1. **Spatial grid allocation**: Divide canvas into N regions (2×2 for 4, 2×3 for 6, 3×3 for 9)
+2. **Per-instance regional conditioning**: Each region gets ONE object with explicit position
+3. **Count-verification negatives**: Actively suppress wrong counts
 
-### 2-3 Objects: Regional Prompting
-- Use regional-control skill with explicit LEFT/RIGHT or spatial anchors
-- Example: "four rabbits" → "REGION_LEFT: two brown rabbits, REGION_RIGHT: two brown rabbits"
+## Implementation (4+ objects - MANDATORY)
 
-### 4-6 Objects: Grid Anchoring + Repetition
-- Use regional-control with EXPLICIT grid layout (top-left, top-right, bottom-left, bottom-right, center-left, center-right)
-- Add count-specific emphasis: (four rabbits:1.4), exactly four, 4 rabbits
-- Negative prompt: "one rabbit, two rabbits, three rabbits, five rabbits"
-- Example: "six cars" → "REGION_TOP: three red cars in a row, REGION_BOTTOM: three red cars in a row, (exactly six cars:1.3)"
+### Step 1: Calculate Grid Layout
+- 2-3 objects: horizontal or triangular layout
+- 4 objects: 2×2 grid
+- 5-6 objects: 2×3 grid  
+- 7-9 objects: 3×3 grid
+- 10+ objects: 4×3 or larger
 
-### 7+ Objects: Spatial Distribution + Strong Repetition
-- Use scattered/crowd composition keywords: "group of seven", "crowd of", "collection of", "array of"
-- Repeat object noun 3-4 times: "seven green croissants, croissant, croissant, croissant, multiple croissants"
-- Add layout hints: "arranged in a circle", "scattered across the scene", "in rows"
-- High emphasis: (seven croissants:1.5)
-- Negative: "one, two, three, four, five, six, eight, nine"
+### Step 2: Regional Prompting Setup
+Use `RegionalPromptSimple` or `RegionalConditioningSimple` nodes:
+```
+For "four brown monkeys":
+- Region 1 (top-left): "one brown monkey, left side, upper area"
+- Region 2 (top-right): "one brown monkey, right side, upper area" 
+- Region 3 (bottom-left): "one brown monkey, left side, lower area"
+- Region 4 (bottom-right): "one brown monkey, right side, lower area"
+```
 
-## Multi-Category Scenes
-When count appears with multiple object types ("four rabbits and a sheep"):
-1. Apply counting strategy to the plural object (four rabbits)
-2. Use multi-category skill to isolate categories
-3. Example: "REGION_LEFT: four brown rabbits, rabbit, rabbit, (exactly four rabbits:1.3) | REGION_RIGHT: one white sheep, single sheep"
+### Step 3: Base Prompt Structure
+Main prompt: "exactly {N} {objects}, {N} individual {objects}, full scene, all visible, arranged in grid"
 
-## Node Instructions
-- Always use regional-control or CLIPTextEncodeSDXLRefiner with separate conditionings
-- For 4+ objects, increase CFG to 8-9 for stronger prompt adherence
-- Consider hires-fix to sharpen individual object details
-- Never rely on base prompt alone for counts above 3
+Negative prompt: "fewer than {N}, only {N-1}, merged {objects}, overlapping {objects}, duplicate, missing {objects}"
 
-## Critical Rules
-- Counts of 4+ REQUIRE regional/grid layout — prompting alone fails
-- Always include negative prompts with wrong counts
-- Repeat the object noun proportional to count (4 objects = 2-3 repetitions, 7+ = 3-4 repetitions)
-- Use emphasis syntax (count:1.3-1.5) for all counts
+### Step 4: Per-Region Emphasis
+Each regional prompt:
+- Uses "one {object}" or "single {object}" (never plural)
+- Includes spatial anchor ("left side", "center", "right side", "top", "bottom")
+- Adds "clearly visible, distinct, separate"
+- Regional strength: 0.8-1.0
+
+### Step 5: Verification Tokens
+Add to main positive prompt:
+- "count of {N}"
+- "{N} distinct {objects}"
+- "no more, no less"
+
+## Special Cases
+
+**Unusual attributes (green croissants, purple trucks):**
+Bind attribute to EACH regional prompt:
+- Region 1: "one green croissant, left side"
+- Region 2: "one green croissant, center"
+- etc.
+
+**Small objects (< 6):** Use simpler layout (row/triangle) but still enforce per-instance regions
+
+**7+ objects:** ALWAYS use 3×3 or larger grid. Consider increasing resolution to 1024×1024 minimum.
+
+## Node Wiring
+1. `CLIPTextEncode` → base positive
+2. `CLIPTextEncode` → base negative  
+3. For each region: `RegionalPromptSimple` with mask + per-instance prompt
+4. `ConditioningCombine` to merge all regional conditions
+5. Feed combined conditioning to `KSampler`
+
+## Critical Parameters
+- CFG: 7-9 (higher CFG helps maintain count)
+- Steps: 35-50 (more steps = better separation)
+- Sampler: dpmpp_2m or euler_a
+- Regional mask feather: 0.1-0.2 (minimize bleed)
+
+## Fallback
+If regional nodes unavailable: Restructure prompt with explicit enumeration:
+"first {object} on the left, second {object} in the center-left, third {object} in the center-right, fourth {object} on the right"

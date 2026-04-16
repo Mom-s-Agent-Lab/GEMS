@@ -121,6 +121,20 @@ def load_prompts(n: int) -> list[dict]:
 EVOLVED_SKILLS_DIR = str(REPO_ROOT / "comfyclaw" / "skills_evolved")
 LEARNED_SKILLS_DIR = os.path.join(EVOLVED_SKILLS_DIR, "learned-errors")
 
+
+def _write_evolution_metadata(evolved_dir: str, **kwargs: object) -> None:
+    """Write or update a metadata JSON in the evolved skills directory."""
+    meta_path = os.path.join(evolved_dir, "evolution_metadata.json")
+    os.makedirs(evolved_dir, exist_ok=True)
+    meta: dict = {}
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            meta = json.load(f)
+    meta.update(kwargs)
+    meta["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+
 def _collect_error_data(harness) -> list[dict]:
     """Extract error/repair events from a completed harness run."""
     errors = []
@@ -399,6 +413,15 @@ def main():
     log.info("Model: %s  Checkpoint: %s", LLM_MODEL, CHECKPOINT)
     log.info("Max iterations: %d  Warm-start: %s", MAX_ITERATIONS, WARM_START)
     log.info("=" * 70)
+
+    _write_evolution_metadata(
+        EVOLVED_SKILLS_DIR,
+        benchmark="claw_benchmark",
+        image_model=CHECKPOINT,
+        agent_model=LLM_MODEL,
+        n_prompts=N_PROMPTS,
+        max_iterations=MAX_ITERATIONS,
+    )
 
     if args.prompt:
         existing = []

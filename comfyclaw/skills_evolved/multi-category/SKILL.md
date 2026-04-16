@@ -1,7 +1,7 @@
 ---
 name: multi-category
 description: >-
-  Generate scenes with semantically distinct object categories (animals+objects, vehicles+nature, food+creatures) using regional prompting, count enforcement, and category isolation to prevent cross-contamination.
+  Generate scenes with semantically distinct object categories (animals+objects, vehicles+nature, food+creatures) using mandatory regional prompting with explicit coordinate masking, per-category positive conditioning, count verification, and category-isolation negative prompts.
 license: MIT
 metadata:
   cluster: "multiple_object_types"
@@ -11,70 +11,79 @@ metadata:
 # Multi-Category Object Generation
 
 ## When to Use
-Trigger when the prompt contains TWO OR MORE semantically distinct object categories in the same scene:
-- Animals + objects (pig and backpack, rabbits and sheep)
-- Vehicles + nature (cars and kangaroo, truck and flowers)
-- Food + creatures (bears and donut)
-- Any mix where categories have different visual priors
+Trigger when the prompt contains objects from 2+ distinct semantic categories:
+- Animal + manufactured object (pig + backpack, kangaroo + car)
+- Animal + animal (rabbits + sheep, bears + birds)
+- Vehicle + nature (cars + flowers, truck + trees)
+- Food + creature (donut + bears, pizza + cats)
+- Any combination where object priors strongly differ
 
-## Core Problem
-Diffusion models blend features across categories — fur textures bleed onto objects, animal colors contaminate vehicles, counts get confused when multiple types coexist.
+## Why It Fails Without This Skill
+Diffusion models merge semantically distant categories into hybrid forms or drop the less-dominant category entirely. "A pig and a backpack" often produces only the pig, or a pig with backpack-colored patches.
 
-## Solution Strategy
+## Required Approach
+**MANDATORY: Use regional prompting with spatial separation. Never attempt multi-category scenes with a single global prompt.**
 
-### 1. Detect Categories and Counts
-Parse the prompt to identify:
-- Category A: object type + count (if specified)
-- Category B: object type + count (if specified)
+### Step 1: Parse and Separate Categories
+Identify each distinct object type and its count:
+- "a green backpack and a pig" → Object1: backpack(1, green), Object2: pig(1)
+- "four rabbits and a sheep" → Object1: rabbits(4), Object2: sheep(1)
+- "six cars and a kangaroo" → Object1: cars(6), Object2: kangaroo(1)
 
-### 2. Invoke Complementary Skills
-- **counting-objects**: If ANY category has a numeric count ("four rabbits", "six cars"), invoke this skill FIRST to get count-enforcement syntax
-- **regional-control**: ALWAYS invoke to create separate conditioning regions for each category
+### Step 2: Allocate Spatial Regions
+Divide the canvas into non-overlapping regions. Use these coordinate patterns:
+- 2 objects: left half (0.0-0.5 x-range) vs right half (0.5-1.0 x-range)
+- 3+ objects of same category + 1 different: grid for multiples (0.0-0.7), single region for unique (0.7-1.0)
+- For counts >4: use 2x2 or 3x2 grid layouts with explicit per-cell coordinates
 
-### 3. Category Isolation Syntax
-Restructure prompt using:
+### Step 3: Configure Regional Prompting Nodes
+For each category:
+1. **create_regional_prompt_node** with:
+   - prompt: "[COUNT] [ATTRIBUTES] [OBJECT], isolated, [MATERIAL/COLOR tokens], highly detailed"
+   - mask_coords: explicit x1,y1,x2,y2 based on Step 2
+   - strength: 1.0
+   - Example: "1 green leather backpack, isolated, product photography" at (0.0, 0.3, 0.5, 0.9)
+
+2. **Add category-isolation negative prompt per region**:
+   - If region is for "backpack", negative: "pig, animal, fur, snout, organic"
+   - If region is for "pig", negative: "backpack, fabric, zipper, straps, manufactured"
+
+### Step 4: Global Negative Prompt
+Add to base negative: "merged objects, hybrid creatures, morphed forms, blended categories, object fusion"
+
+### Step 5: Verification Tokens
+In global positive prompt, append: "[COUNT1] [OBJECT1] AND [COUNT2] [OBJECT2], clearly separated, distinct entities"
+Example: "1 backpack AND 1 pig, clearly separated, distinct entities"
+
+### Step 6: Sampler Settings
+- cfg_scale: 8.5-10.0 (higher CFG enforces regional boundaries)
+- steps: 35+ (complex scenes need more denoising iterations)
+- If using SDXL: set refiner at 0.7 to sharpen category boundaries
+
+## Node Sequence
 ```
-[Category A with count], isolated, distinct | [Category B with count], separate, individual
+CLIPTextEncode (global positive + verification tokens)
+  ↓
+RegionalPromptNode1 (category 1, mask A, negative=category2 tokens)
+  ↓
+RegionalPromptNode2 (category 2, mask B, negative=category1 tokens)
+  ↓
+[...additional regions if needed]
+  ↓
+ConditioningCombine (merge all regional conditionings)
+  ↓
+KSampler (cfg=9.0, steps=35)
 ```
 
-Add negative prompt:
-```
-(merged:1.3), (blended:1.3), (hybrid:1.2), fused, combined, mixed features
-```
+## Common Mistakes to Avoid
+- ❌ Using single prompt for multiple categories
+- ❌ Overlapping regional masks
+- ❌ Forgetting category-isolation negatives
+- ❌ CFG < 8.0 (too weak to enforce separation)
+- ❌ Not explicitly stating counts in verification tokens
 
-### 4. Regional Prompting Setup
-- Region 1 (60% image): Category A + "no [Category B]"
-- Region 2 (40% image): Category B + "no [Category A]"
-- Mask overlap: 10% transition zone only
-
-### 5. Sampler Adjustments
-- CFG scale: 8.5-9.5 (higher guidance prevents category mixing)
-- Steps: 35+ (more steps = better category separation)
-
-## Example Transformation
-**Input:** "four rabbits and a sheep"
-
-**After counting-objects:** "four rabbits, 1 2 3 4, individual rabbits separated"
-
-**After multi-category:**
-```
-Prompt: "four rabbits, distinct individual animals | one sheep, separate animal, isolated"
-Negative: "(merged animals:1.3), (blended:1.3), rabbit-sheep hybrid"
-```
-
-**Regional setup:**
-- Region 1: "four rabbits, no sheep"
-- Region 2: "one sheep, no rabbits"
-
-## Node-Level Actions
-1. Call `query_skill('counting-objects')` if counts present
-2. Call `query_skill('regional-control')` always
-3. Use `CLIPTextEncode` with category-isolated positive prompt
-4. Use separate `CLIPTextEncode` for strong negative prompt
-5. Configure `KSampler`: cfg=9.0, steps=40
-
-## Validation
-Verify output contains:
-- Correct count for each category
-- No feature blending (fur on metal, scales on fabric)
-- Spatial separation between categories
+## Success Criteria
+- All categories present in output
+- No hybrid/morphed forms
+- Correct counts for each object type
+- Attributes (color, material) correctly bound to intended objects
