@@ -89,6 +89,12 @@ parser.add_argument(
     default=600,
     help="[comfygems] seconds to wait for each ComfyUI job.",
 )
+parser.add_argument(
+    "--limit",
+    type=int,
+    default=None,
+    help="Only process the first N prompts (useful for smoke tests).",
+)
 args = parser.parse_args()
 
 
@@ -205,6 +211,9 @@ def main():
 
     total_count = len(all_data_with_ids)
     print(f"Total prompts in dataset: {total_count}")
+    if args.limit is not None:
+        all_data_with_ids = all_data_with_ids[: args.limit]
+        print(f"--limit set: restricting to first {len(all_data_with_ids)} prompts.")
 
     existing_mapping = {}
     if os.path.exists(MAPPING_FILE):

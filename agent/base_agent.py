@@ -1,10 +1,15 @@
 import abc
+import os
 import requests
 import base64
 import litellm
 from agent.skill_manager import SkillManager
 
-LITELLM_MODEL = "anthropic/claude-sonnet-4-6"
+# Default MLLM for reasoning / verify / refine.  Override at launch time
+# by exporting ``LITELLM_MODEL=...`` (any model string LiteLLM accepts,
+# e.g. ``anthropic/claude-sonnet-4-5``, ``openai/gpt-4o``,
+# ``gemini/gemini-2.0-flash``).
+LITELLM_MODEL = os.environ.get("LITELLM_MODEL", "anthropic/claude-sonnet-4-6")
 
 class BaseAgent(metaclass=abc.ABCMeta):
     def __init__(self, gen_url, mllm_url=None):
