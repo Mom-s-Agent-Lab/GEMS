@@ -20,6 +20,7 @@
 - [Setup — MLLM (shared by both lines)](#setup--mllm-shared-by-both-lines)
 - [Line 1 — HTTP Generation (`infer.py`)](#line-1--http-generation-inferpy)
 - [Line 2 — ComfyUI Generation (`infer_comfy.py`)](#line-2--comfyui-generation-infer_comfypy)
+- [Line 3 — Agentic ComfyUI Generation (`ComfyGEMSAgentic`)](#line-3--agentic-comfyui-generation-comfygemsagentic)
 - [Evaluation](#evaluation)
 - [Skills](#skills)
 - [Citation](#citation)
@@ -28,41 +29,50 @@
 
 ## Project Overview
 
-GEMS ships with **two interchangeable image-generation lines**. Both share the same
-decompose → generate → verify → refine pipeline and the same `SkillManager` / planner;
-only the `generate()` backend differs.
+GEMS ships with **three interchangeable image-generation lines**. All share the
+*same* decompose → generate → verify → refine pipeline (`agent/GEMS.py`) and the
+same `SkillManager` / planner; only the `generate()` backend differs.
 
-| Line | Entry | Backend | Supported generators |
-|---|---|---|---|
-| **HTTP line** | `infer.py` | `agent/GEMS.py` → FastAPI server (`POST /generate?prompt=…`) | Qwen-Image-2512, Z-Image-Turbo |
-| **ComfyUI line** | `infer_comfy.py` | `agent/comfy_gems.py` → ComfyUI REST API (`/prompt`, `/history`, `/view`) | Qwen-Image-2512, Z-Image-Turbo, FLUX.2 [klein] 9B, LongCat-Image |
+| Line | Entry | Backend | Graph construction | Supported generators |
+|---|---|---|---|---|
+| **HTTP line** | `infer.py` | `agent/GEMS.py` → FastAPI server | N/A (single model endpoint) | Qwen-Image-2512, Z-Image-Turbo |
+| **ComfyUI line** | `infer_comfy.py` | `agent/comfy_gems.py` → ComfyUI REST API | **Static template** (one per model) | Qwen-Image-2512, Z-Image-Turbo, FLUX.2 [klein] 9B, LongCat-Image |
+| **Agentic ComfyUI line** | `ComfyGEMSAgentic` | `agent/comfy_gems_agentic.py` → ComfyUI REST API | **LLM tool-use** (`add_node` / `connect_nodes` / `set_param` / …) | any, discovered at runtime via ComfyUI `/object_info` |
 
 ```text
 GEMS/
 ├── agent/
-│   ├── server/                 # FastAPI image-gen servers (HTTP line)
-│   │   ├── kimi.sh             # Kimi-K2.5 MLLM
-│   │   ├── qwen_image.py       # Qwen-Image-2512 server
-│   │   └── z_image.py          # Z-Image-Turbo server
-│   ├── skills/                 # prompt-routing skills
-│   │   ├── aesthetic_drawing/  #   legacy GEMS skills
+│   ├── server/                     # FastAPI image-gen servers (HTTP line)
+│   │   ├── kimi.sh                 # Kimi-K2.5 MLLM
+│   │   ├── qwen_image.py           # Qwen-Image-2512 server
+│   │   └── z_image.py              # Z-Image-Turbo server
+│   ├── skills/                     # prompt-routing skills
+│   │   ├── aesthetic_drawing/      #   legacy GEMS skills
 │   │   ├── creative_drawing/
 │   │   ├── spatial/
 │   │   ├── text_rendering/
-│   │   ├── qwen-image-2512/    #   ComfyUI model skills
+│   │   ├── qwen-image-2512/        #   ComfyUI model skills
 │   │   ├── z-image-turbo/
 │   │   ├── flux-klein-9b/
 │   │   └── longcat-image/
-│   ├── base_agent.py           # BaseAgent + LiteLLM config
-│   ├── GEMS.py                 # pipeline (HTTP line)
-│   ├── comfy_gems.py           # ComfyGEMS subclass (ComfyUI line)
-│   ├── comfy_client.py         # minimal ComfyUI HTTP client
-│   ├── comfy_workflow.py       # ComfyUI API-format templates
-│   └── skill_manager.py        # loads SKILL.md (both formats)
-├── eval/                       # GenEval2, CREA, ArtiMuse
-├── infer.py                    # HTTP-line demo
-└── infer_comfy.py              # ComfyUI-line demo
+│   ├── base_agent.py               # BaseAgent + LiteLLM config
+│   ├── GEMS.py                     # shared pipeline (all three lines)
+│   ├── comfy_gems.py               # ComfyGEMS        (static template)
+│   ├── comfy_gems_agentic.py       # ComfyGEMSAgentic (tool-use graph)
+│   ├── comfy_client.py             # minimal ComfyUI HTTP client
+│   ├── comfy_workflow.py           # ComfyUI API-format templates
+│   └── skill_manager.py            # loads SKILL.md (both formats)
+├── eval/                           # GenEval2, CREA, ArtiMuse
+├── infer.py                        # HTTP-line demo
+├── infer_comfy.py                  # ComfyUI-line demo
+└── run_comfy_batch.py              # parallel batch runner (static + agentic)
 ```
+
+> The agentic line additionally depends on the sibling
+> [`comfyclaw`](https://github.com/davidliuk/comfyclaw) package for its
+> `WorkflowManager` graph primitives — see
+> [Line 3](#line-3--agentic-comfyui-generation-comfygemsagentic) for install
+> instructions.
 
 ---
 
@@ -336,18 +346,187 @@ item per worker.
 
 - A single ComfyUI server serialises its job queue, so raising
   `--workers-per-server` above 1 *won't* make image generation faster,
-  but it **does** overlap MLLM HTTP latency (decompose / verify / refine)
-  with ComfyUI work — usually a 1.3–1.8× speed-up on short prompts.
+  but it **does** overlap MLLM HTTP latency (decompose / verify / refine,
+  plus the tool-use loop in `--agentic` mode) with ComfyUI work —
+  usually a 1.3–1.8× speed-up on short prompts.
 - For true parallelism, launch N ComfyUI servers (different GPUs /
   hosts) and pass them all to `--comfyui-servers`.
+
+**Switch to the agentic backend** with `--agentic` (same output layout,
+same resume semantics — see
+[Line 3](#line-3--agentic-comfyui-generation-comfygemsagentic)):
+
+```bash
+python run_comfy_batch.py --agentic \
+    --prompts prompts.jsonl --output-dir results/my_run_agentic \
+    --model z-image-turbo --comfyui-servers 127.0.0.1:8188 \
+    --workers-per-server 2 --max-iterations 5
+```
 
 ### Scope (by design)
 
 Only `generate()` is new. The refine loop still edits only the **positive prompt**,
 verification is still the stock MLLM yes/no decomposition, and the workflow itself
 is **not** topologically evolved (no LoRA / ControlNet auto-insertion, no sampler
-LLM-tuning, no repair loop). Use [`comfyclaw`](https://github.com/...) if you want
-topology evolution on top of ComfyUI.
+LLM-tuning, no repair loop).  For topology evolution, use
+[Line 3](#line-3--agentic-comfyui-generation-comfygemsagentic) below.
+
+---
+
+## Line 3 — Agentic ComfyUI Generation (`ComfyGEMSAgentic`)
+
+Same pipeline as Line 2, but `generate()` no longer fills in a hard-coded
+ComfyUI template — instead the MLLM **builds the ComfyUI graph node-by-node
+via tool calls** (`add_node`, `connect_nodes`, `set_param`, `set_prompt`,
+`query_available_models`, `validate_workflow`, `finalize_workflow`, …),
+then the finalised graph is submitted to ComfyUI exactly like Line 2.
+
+### When to pick Line 3 over Line 2
+
+| You want… | Line 2 (static) | Line 3 (agentic) |
+|---|:---:|:---:|
+| Predictable / deterministic wiring | ✅ | ❌ (LLM sampling) |
+| Minimal token budget | ✅ | ❌ (extra tool-use loop each round) |
+| Any ComfyUI model, no template editing | ❌ (4 presets) | ✅ (discovers models via `/object_info`) |
+| LoRA / ControlNet / hires-fix on the fly | ❌ | ✅ (LLM adds nodes) |
+| Structural fixes between refine rounds | ❌ | ✅ (see below) |
+
+### Pipeline & state model
+
+`ComfyGEMSAgentic` inherits `GEMS` unchanged — `run_with_trace` /
+`plan` / `decompose` / `verify_image` / prompt refinement are identical to
+Line 1 and Line 2.  The only override is `generate(prompt)`, which runs a
+LiteLLM tool-use loop against a fresh / evolving `WorkflowManager`.
+
+Graph state lifecycle:
+
+* **Within one task** (one `run_with_trace` call), the graph *persists*
+  across decompose → generate → verify → refine rounds.  Round 2 starts
+  from the graph round 1 built, and the LLM typically makes only small
+  structural edits (rewrite the prompt, swap a sampler, add hires-fix) —
+  much cheaper than rebuilding from scratch.
+* **Between tasks**, the graph is wiped automatically at the top of
+  `run_with_trace`, so one prompt never leaks its workflow into the next.
+  You can reuse the same `ComfyGEMSAgentic` object across many prompts
+  safely.
+
+### Model recipe injection (skill → builder)
+
+The builder LLM by itself only knows "generic SD-style" ComfyUI graphs — it
+will *not* reliably pick the right `CLIPLoader type`, sampler, mandatory
+conditioning nodes (`ModelSamplingAuraFlow`, `ConditioningZeroOut`, …), etc.
+for model families it hasn't seen in pre-training.  To fix this,
+`ComfyGEMSAgentic` automatically loads the matching `SKILL.md` from
+`agent/skills/<skill_id>/` and prepends it to every builder message as a
+`## Model recipe (<skill_id>)` block.  The LLM is told to follow the recipe
+as the authoritative source of `class_type`s, filenames, sampler config and
+mandatory nodes.
+
+Two knobs control this:
+
+* `skill_model` — which skill to inject (defaults to `seed_model`).  You can
+  set `seed_model=None, skill_model="z-image-turbo"` to build from an empty
+  graph while still giving the LLM the z-image recipe — this works in
+  practice (verified at 16/16 recipe-compliance on z-image-turbo).
+* `inject_skill_into_builder=False` — disables the feature (useful for
+  ablations or when you want a tighter token budget).
+* `skill_max_chars` — caps the injected body length (default 12 000 chars).
+
+### 1. Install
+
+Install the sibling `comfyclaw` package for its `WorkflowManager`:
+
+```bash
+# Option A — checkout next to GEMS (auto-detected on sys.path):
+git clone https://github.com/davidliuk/comfyclaw.git ../comfyclaw
+
+# Option B — pip install:
+pip install -e /path/to/comfyclaw
+```
+
+The rest of the setup (ComfyUI server + model weights) is identical to Line 2.
+
+### 2. Run
+
+**Programmatic:**
+
+```python
+from agent.comfy_gems_agentic import ComfyGEMSAgentic
+
+agent = ComfyGEMSAgentic(
+    comfyui_server="127.0.0.1:8188",
+    seed_model="qwen-image-2512",   # start from a known-good template, let
+                                     # the LLM evolve it. Set to None to
+                                     # force building from an EMPTY graph.
+    max_tool_rounds=30,              # safety cap on tool calls / generate()
+    builder_model=None,              # LiteLLM model for the tool-use loop;
+                                     # defaults to LITELLM_MODEL (same as
+                                     # the verifier MLLM). Set separately
+                                     # if you want a cheaper builder.
+    max_iterations=5,                # GEMS decompose/verify/refine cap
+    seed=42,                         # pin KSampler / RandomNoise seeds
+    workflow_log_dir="agentic_logs", # dumps workflow + LLM tool-call trace
+    inject_skill_into_builder=True,  # (default) inject <skill_model>/SKILL.md
+                                     # into every builder message
+    skill_model=None,                # which skill to inject; defaults to
+                                     # seed_model. Set separately when you
+                                     # want seed_model=None but still want
+                                     # a specific model recipe, e.g.
+                                     # seed_model=None, skill_model="z-image-turbo"
+)
+result = agent.run_with_trace({"prompt": "a cozy cabin in a snowy pine forest at dusk"})
+with open("out.png", "wb") as f:
+    f.write(result["best_image"])
+
+# Introspection after a run:
+agent.last_workflow     # last graph submitted (deep-copied dict)
+agent.last_tool_trace   # per-call record: [{round, name, args, result}, ...]
+```
+
+**Batch (via `run_comfy_batch.py --agentic`):**
+
+```bash
+# Agentic + seeded from z-image-turbo template (recommended starting point):
+python run_comfy_batch.py \
+    --prompts prompts.jsonl \
+    --output-dir results/my_run_agentic \
+    --agentic \
+    --model z-image-turbo \
+    --comfyui-servers 127.0.0.1:8188 \
+    --workers-per-server 2 \
+    --max-iterations 5
+
+# Agentic + build from an EMPTY graph every task + GPT-4o as the builder:
+python run_comfy_batch.py \
+    --prompts prompts.jsonl \
+    --output-dir results/my_run_empty \
+    --agentic --no-seed-model \
+    --builder-model openai/gpt-4o \
+    --comfyui-servers 127.0.0.1:8188
+```
+
+See `python run_comfy_batch.py --help` for the full list of `--agentic`
+knobs (`--no-seed-model`, `--fresh-each-round`, `--builder-model`,
+`--max-tool-rounds`).  The output layout is the same as Line 2, plus each
+`traces/prompt_NNNNN/workflows/workflow_NNN.json` additionally carries the
+LLM tool-call trace that produced that graph.
+
+### 3. Failure modes & safeguards
+
+The LLM can occasionally misfire when constructing graphs.  The built-in
+safeguards are:
+
+| Safeguard | What it does |
+|---|---|
+| `finalize_workflow` auto-validate | runs `WorkflowManager.validate_graph`; if there are dangling refs / missing outputs, the call is rejected and the LLM must repair before finalising. |
+| `max_tool_rounds` cap | stops runaway loops (default 30). If hit, the current graph is submitted as-is. |
+| `WorkflowManager.ensure_output_wiring` | last-resort auto-fix for missing `SaveImage.images` or `SaveImage.filename_prefix`. |
+| `seed_model` template | the default — gives the LLM a known-good starting graph, so it only ever needs to make edits. |
+| `SKILL.md` injection | the authoritative recipe for the model (sampler config, CLIP type, mandatory nodes, filenames) is prepended to every builder message — so even `seed_model=None` can reliably produce a correct graph for models covered by `agent/skills/`. |
+
+In practice we recommend keeping `--seed-model` enabled (the default) and
+only passing `--no-seed-model` when you want to stress-test the builder
+or work with a model that has no preset template.
 
 ---
 

@@ -1,15 +1,27 @@
 """Parallel batch runner for the GEMS ComfyUI line.
 
 Fans a list of prompts out across one or more ComfyUI servers and/or
-multiple client workers per server.  Each worker owns its own
-:class:`agent.comfy_gems.ComfyGEMS` instance, so the full
-decompose → generate → verify → refine pipeline runs independently per
-prompt.
+multiple client workers per server.  Each worker owns its own agent
+instance, so the full decompose → generate → verify → refine pipeline
+runs independently per prompt.
+
+Two backends are available via ``--agentic``:
+
+* **static** (default): :class:`agent.comfy_gems.ComfyGEMS` — each
+  ``generate()`` call fills in a hard-coded ComfyUI workflow template
+  (one of ``qwen-image-2512`` / ``z-image-turbo`` / ``flux-klein-9b`` /
+  ``longcat-image``) and injects the current prompt.
+* **agentic** (``--agentic``): :class:`agent.comfy_gems_agentic.ComfyGEMSAgentic`
+  — the MLLM uses tool-use (``add_node`` / ``connect_nodes`` / ``set_param`` /
+  ``set_prompt`` / …) to BUILD the ComfyUI graph node-by-node.  Within one
+  task the graph is *evolved* across GEMS iterations (cheap round-2
+  structural edits); between tasks it is wiped automatically.
 
 Why parallelism helps here, even though a single ComfyUI server
 serialises its job queue:
 
-* the MLLM round-trips (decompose / verify / refine) dominate wall time
+* the MLLM round-trips (decompose / verify / refine, plus — in agentic
+  mode — the tool-use loop for graph construction) dominate wall time
   for short-prompt workloads, and they overlap cleanly with ComfyUI
   work when ``--workers-per-server`` > 1;
 * if you have N ComfyUI servers reachable (e.g. different GPUs or
@@ -21,7 +33,7 @@ Typical usage
 
 .. code-block:: bash
 
-    # 1 ComfyUI server, 2 client workers overlapping MLLM + ComfyUI:
+    # [static] 1 ComfyUI server, 2 client workers:
     python run_comfy_batch.py \\
         --prompts prompts.jsonl \\
         --output-dir results/my_run \\
@@ -30,12 +42,30 @@ Typical usage
         --workers-per-server 2 \\
         --max-iterations 5
 
-    # 4 ComfyUI servers (one worker each, auto):
+    # [static] 4 ComfyUI servers (one worker each, auto):
     python run_comfy_batch.py \\
         --prompts prompts.jsonl \\
         --output-dir results/my_run \\
         --model qwen-image-2512 \\
         --comfyui-servers host1:8188,host2:8188,host3:8188,host4:8188
+
+    # [agentic] tool-use graph construction, seeded from z-image-turbo template:
+    python run_comfy_batch.py \\
+        --prompts prompts.jsonl \\
+        --output-dir results/my_run_agentic \\
+        --agentic \\
+        --model z-image-turbo \\
+        --comfyui-servers 127.0.0.1:8188 \\
+        --workers-per-server 2 \\
+        --max-iterations 5
+
+    # [agentic] from an EMPTY graph (builder LLM = GPT-4o):
+    python run_comfy_batch.py \\
+        --prompts prompts.jsonl \\
+        --output-dir results/my_run_agentic_empty \\
+        --agentic --no-seed-model \\
+        --builder-model openai/gpt-4o \\
+        --comfyui-servers 127.0.0.1:8188
 
 Input format
 ------------
@@ -63,6 +93,8 @@ Output layout
           best.png
           round_1.png, round_2.png, ...
           workflows/workflow_001.json  # every submitted workflow
+                                       # (agentic mode also includes the
+                                       # LLM tool-call trace per workflow)
         ...
       logs/
         worker_0.log
@@ -173,6 +205,48 @@ def _parse_args() -> argparse.Namespace:
         help="Multiprocessing start method. 'spawn' is safest; 'fork' "
              "is faster but unsafe with many HTTP clients / CUDA.",
     )
+
+    # -- Agentic-mode knobs --------------------------------------------------
+    agentic = p.add_argument_group(
+        "agentic mode (tool-use workflow construction)",
+        "Requires the sibling comfyclaw checkout (WorkflowManager) on disk "
+        "or installed. Enabled by --agentic.",
+    )
+    agentic.add_argument(
+        "--agentic",
+        action="store_true",
+        help="Use ComfyGEMSAgentic instead of ComfyGEMS. The MLLM builds the "
+             "ComfyUI graph node-by-node via tool calls, and evolves it "
+             "across GEMS iterations within a task (wiped between tasks).",
+    )
+    agentic.add_argument(
+        "--no-seed-model",
+        action="store_true",
+        help="(agentic) Force the LLM to build from an EMPTY graph. "
+             "By default --model is passed as the seed template and the LLM "
+             "only edits it — much cheaper and more reliable.",
+    )
+    agentic.add_argument(
+        "--fresh-each-round",
+        action="store_true",
+        help="(agentic) Reset the graph to the seed template on EVERY "
+             "generate() call, even within the same task. Default: keep "
+             "evolving within a task (recommended).",
+    )
+    agentic.add_argument(
+        "--builder-model",
+        default=os.environ.get("GEMS_BUILDER_MODEL"),
+        help="(agentic) LiteLLM model string for the tool-use loop "
+             "(e.g. 'anthropic/claude-sonnet-4-5', 'openai/gpt-4o'). "
+             "Defaults to LITELLM_MODEL — same as the verifier MLLM.",
+    )
+    agentic.add_argument(
+        "--max-tool-rounds",
+        type=int,
+        default=30,
+        help="(agentic) Safety cap on LLM tool-call iterations per "
+             "generate() call.",
+    )
     return p.parse_args()
 
 
@@ -218,7 +292,11 @@ def _worker(
 ) -> None:
     # Everything heavy is imported inside the child (spawn-safe,
     # friendlier to torch / CUDA init if any downstream hook uses it).
-    from agent.comfy_gems import ComfyGEMS
+    agentic_mode: bool = bool(args_dict.get("agentic", False))
+    if agentic_mode:
+        from agent.comfy_gems_agentic import ComfyGEMSAgentic
+    else:
+        from agent.comfy_gems import ComfyGEMS
 
     output_dir = Path(args_dict["output_dir"])
     log_path = output_dir / "logs" / f"worker_{rank}.log"
@@ -232,16 +310,35 @@ def _worker(
     def _log(msg: str) -> None:
         print(f"[worker {rank} @ {server}] {msg}", flush=True)
 
-    _log(f"spawning ComfyGEMS(model={args_dict['model']!r})")
     try:
-        agent = ComfyGEMS(
-            model=args_dict["model"],
-            comfyui_server=server,
-            max_iterations=args_dict["max_iterations"],
-            seed=args_dict["seed"],
-            workflow_timeout=args_dict["workflow_timeout"],
-            workflow_log_dir=None,  # set per-prompt below
-        )
+        if agentic_mode:
+            seed_model = None if args_dict.get("no_seed_model") else args_dict["model"]
+            _log(
+                f"spawning ComfyGEMSAgentic(seed_model={seed_model!r}, "
+                f"builder_model={args_dict.get('builder_model')!r}, "
+                f"fresh_each_round={args_dict.get('fresh_each_round', False)})"
+            )
+            agent = ComfyGEMSAgentic(
+                comfyui_server=server,
+                seed_model=seed_model,
+                fresh_each_round=bool(args_dict.get("fresh_each_round", False)),
+                max_tool_rounds=int(args_dict.get("max_tool_rounds", 30)),
+                builder_model=args_dict.get("builder_model"),
+                max_iterations=args_dict["max_iterations"],
+                seed=args_dict["seed"],
+                workflow_timeout=args_dict["workflow_timeout"],
+                workflow_log_dir=None,  # set per-prompt below
+            )
+        else:
+            _log(f"spawning ComfyGEMS(model={args_dict['model']!r})")
+            agent = ComfyGEMS(
+                model=args_dict["model"],
+                comfyui_server=server,
+                max_iterations=args_dict["max_iterations"],
+                seed=args_dict["seed"],
+                workflow_timeout=args_dict["workflow_timeout"],
+                workflow_log_dir=None,  # set per-prompt below
+            )
     except Exception as exc:
         _log(f"failed to init agent: {exc}\n{traceback.format_exc()}")
         result_queue.put({"rank": rank, "fatal": str(exc)})
@@ -353,7 +450,18 @@ def main() -> None:
         raise SystemExit("--comfyui-servers is empty")
     workers_per_server = max(1, args.workers_per_server)
     total_workers = len(servers) * workers_per_server
+    if args.agentic:
+        backend = (
+            f"ComfyGEMSAgentic (tool-use; "
+            f"seed={'<empty>' if args.no_seed_model else args.model}, "
+            f"builder={args.builder_model or '<LITELLM_MODEL>'}, "
+            f"max_tool_rounds={args.max_tool_rounds}, "
+            f"fresh_each_round={args.fresh_each_round})"
+        )
+    else:
+        backend = f"ComfyGEMS (static template; model={args.model})"
     print(
+        f"Backend: {backend}\n"
         f"Servers: {servers} · workers/server: {workers_per_server} · "
         f"total workers: {total_workers}"
     )
@@ -375,6 +483,12 @@ def main() -> None:
         workflow_timeout=args.workflow_timeout,
         save_all_rounds=args.save_all_rounds,
         save_workflows=args.save_workflows,
+        # agentic-mode knobs (ignored when --agentic is not set)
+        agentic=args.agentic,
+        no_seed_model=args.no_seed_model,
+        fresh_each_round=args.fresh_each_round,
+        builder_model=args.builder_model,
+        max_tool_rounds=args.max_tool_rounds,
     )
 
     procs = []
