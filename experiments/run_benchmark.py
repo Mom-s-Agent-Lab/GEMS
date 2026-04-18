@@ -120,7 +120,9 @@ def _slug(text: str, max_len: int = 50) -> str:
 
 # ── Paths derived from model + benchmark ──────────────────────────────────
 
-EXPERIMENTS_ROOT = Path(os.environ.get("EXPERIMENTS_ROOT", str(REPO_ROOT.parent / "comfy_agent_experiments_output")))
+_DEFAULT_EXPERIMENTS_ROOT = str(REPO_ROOT.parent / "comfy_agent_experiments_output")
+_DEFAULT_BASELINE_ROOT = str(REPO_ROOT.parent / "comfy_agent_baseline_experiments_output")
+EXPERIMENTS_ROOT: Path = Path(os.environ.get("EXPERIMENTS_ROOT", _DEFAULT_EXPERIMENTS_ROOT))
 
 
 def _build_paths(model_short: str, bench_short: str, agent_name: str = "") -> dict:
@@ -519,6 +521,9 @@ def main():
     model_config = MODELS[args.model]
     bench_config = BENCHMARKS[args.benchmark]
     is_baseline = args.baseline
+    if is_baseline and "EXPERIMENTS_ROOT" not in os.environ:
+        global EXPERIMENTS_ROOT
+        EXPERIMENTS_ROOT = Path(_DEFAULT_BASELINE_ROOT)
     agent_name = args.agent_name or ("baseline" if is_baseline else _agent_slug(LLM_MODEL))
     paths = _build_paths(model_config["short_name"], bench_config["short_name"], agent_name)
 
