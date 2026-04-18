@@ -93,6 +93,10 @@ outputs/
 # ─── Benchmark / experiment outputs ───────────────────────────────────────────
 benchmark_*/
 experiment_results/
+experiments_output/
+# Skills auto-evolved by benchmark runs (per-agent, per-benchmark subtrees).
+comfyclaw/evolved_skills/
+comfyclaw/skills_evolved_*/
 *.db
 
 # ─── Logs ─────────────────────────────────────────────────────────────────────

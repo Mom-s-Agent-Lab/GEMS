@@ -31,6 +31,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.stdout.reconfigure(line_buffering=True)
 
+try:
+    from dotenv import load_dotenv  # type: ignore[import-untyped]
+    _env_path = REPO_ROOT / ".env"
+    if _env_path.exists():
+        load_dotenv(_env_path, override=False)
+except ImportError:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",

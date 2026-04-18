@@ -213,34 +213,96 @@ python experiments/run_benchmark.py --model longcat --benchmark dpg-bench \
 
 ### Using alternative LLM providers
 
-The benchmark runner supports any LLM accessible via [litellm](https://docs.litellm.ai/),
-including OpenAI, NVIDIA NIM, Azure, and other OpenAI-compatible APIs.
+The benchmark runner routes every LLM call through [litellm](https://docs.litellm.ai/),
+so it works with any OpenAI-compatible endpoint — OpenAI, Anthropic, NVIDIA NIM,
+Azure OpenAI, Gemini, Perplexity, vLLM servers, etc. Three env vars control it:
+
+| Variable | Purpose | Example |
+|---|---|---|
+| `LLM_MODEL` | litellm model string | `openai/azure/openai/gpt-5.4` |
+| `LLM_API_KEY` | provider API key (falls back to `ANTHROPIC_API_KEY`) | `nvapi-...` |
+| `LLM_API_BASE` | base URL for non-default / OpenAI-compatible gateways | `https://inference-api.nvidia.com` |
+
+**Model-string convention.** The prefix before the first `/` tells litellm which
+HTTP protocol to speak; everything after it is sent verbatim as the endpoint's
+`model` field. So `openai/azure/openai/gpt-5.4` speaks the OpenAI chat protocol
+to `LLM_API_BASE` with `model="azure/openai/gpt-5.4"` in the request body.
+
+**Loading.** `run_benchmark.py` auto-loads the repo-root `.env`, so you can put
+`LLM_*` there instead of exporting every time. CLI / shell `export`s still win
+(the loader uses `override=False`).
 
 ```bash
-# NVIDIA Inference API (GPT-5.4 via NVIDIA NIM)
-export LLM_API_KEY="your-nvidia-api-key"
-export LLM_API_BASE="https://inference-api.nvidia.com"
-export LLM_MODEL="openai/azure/openai/gpt-5.4"
-python experiments/run_benchmark.py --model longcat --benchmark geneval2 --agent-name gpt-5.4
+# ── Anthropic (default; no LLM_* vars needed) ──────────────────────────
+export ANTHROPIC_API_KEY="sk-ant-..."
+python experiments/run_benchmark.py --model longcat --benchmark geneval2
 
-# OpenAI directly
+# ── OpenAI directly ────────────────────────────────────────────────────
 export LLM_API_KEY="sk-..."
 export LLM_MODEL="openai/gpt-4o"
 python experiments/run_benchmark.py --model longcat --benchmark geneval2
 
-# Anthropic (default)
-export ANTHROPIC_API_KEY="sk-ant-..."
+# ── NVIDIA Inference API (hosts GPT, Claude, Gemini, Llama, …) ─────────
+export LLM_API_KEY="nvapi-..."
+export LLM_API_BASE="https://inference-api.nvidia.com"
+export LLM_MODEL="openai/azure/openai/gpt-5.4"
+python experiments/run_benchmark.py --model longcat --benchmark geneval2 \
+    --agent-name gpt-5.4
+
+# ── Azure OpenAI (your own deployment) ─────────────────────────────────
+export LLM_API_KEY="<azure-key>"
+export LLM_API_BASE="https://<resource>.openai.azure.com"
+export LLM_MODEL="azure/<deployment-name>"
+export AZURE_API_VERSION="2024-08-01-preview"
 python experiments/run_benchmark.py --model longcat --benchmark geneval2
 ```
 
-The `--agent-name` flag (or auto-derived from `LLM_MODEL`) determines the output
-subfolder, so results from different agents are kept separate:
+**NVIDIA model catalog.** The same NVIDIA key usually gives access to multiple
+providers. Useful `LLM_MODEL` values:
+
+| Provider | `LLM_MODEL` value | Notes |
+|---|---|---|
+| OpenAI GPT | `openai/azure/openai/gpt-5.4` | Flagship, recommended for agent |
+| OpenAI GPT | `openai/azure/openai/gpt-4o` | Faster / cheaper |
+| OpenAI GPT | `openai/azure/openai/gpt-4.1` | |
+| OpenAI reasoning | `openai/azure/openai/o3` | Slow but strong |
+| Anthropic | `openai/azure/anthropic/claude-sonnet-4-5` | Claude via NVIDIA |
+| Open weights | `openai/nvcf/meta/llama-3.3-70b-instruct` | Free tier |
+| Open weights | `openai/nvcf/openai/gpt-oss-120b` | Free tier |
+
+List the full catalog (and check which ones your key is actually allowed to use):
+
+```bash
+# Enumerate every model the endpoint knows about
+curl -sS https://inference-api.nvidia.com/v1/models \
+  -H "Authorization: Bearer $LLM_API_KEY" | jq -r '.data[].id'
+
+# Probe one specific model (success = 200, blocked = 401 key_model_access_denied)
+curl -sS -X POST https://inference-api.nvidia.com/v1/chat/completions \
+  -H "Authorization: Bearer $LLM_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"azure/openai/gpt-5.4","messages":[{"role":"user","content":"ping"}],"max_tokens":8}'
+```
+
+If you see `401 key_model_access_denied: key can only access models=['default-models']`,
+your key is on the free/default tier — use one of the `nvcf/…` models above, or
+request access to the gated ones.
+
+**Output organisation.** The `--agent-name` flag (or the auto-slug derived from
+`LLM_MODEL`) determines the output subfolder, so runs with different agents stay
+separate:
 
 ```
 experiments_output/longcat_geneval2/
 ├── claude-sonnet-4-5/    # default agent
 ├── gpt-5.4/              # --agent-name gpt-5.4
 └── gpt-4o/               # auto-derived from openai/gpt-4o
+```
+
+**Retry / timeout tuning.** Useful when a hosted endpoint is flaky:
+
+```bash
+export LLM_NUM_RETRIES=5           # default 3
+export LLM_REQUEST_TIMEOUT=600     # seconds, default 300
 ```
 
 ### Automated setup (recommended)
