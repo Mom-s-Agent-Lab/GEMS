@@ -451,6 +451,41 @@ The script skips files that already exist, so it's safe to re-run. Shared files 
 
 After downloading models, restart ComfyUI so it picks up the new files.
 
+### LoRA downloads (manual)
+
+The LoRA files are hosted on Civitai and require a logged-in account to download.
+`setup.py` will attempt to download them automatically if you set `CIVITAI_API_TOKEN`,
+but some models require you to first visit the page and accept the creator's terms.
+
+If automatic download fails, download them manually from the links below and upload
+to your server.
+
+**Qwen LoRAs:**
+
+| LoRA | Save as | Link |
+|------|---------|------|
+| Real Life LoRa Qwen | `real_life_qwen.safetensors` | https://civitai.com/models/2056953?modelVersionId=2327746 |
+| Qwen Aesthetic | `Qwen_art_lora.safetensors` | https://civitai.com/models/2010520?modelVersionId=2359367 |
+
+**Z-Image-Turbo LoRAs:**
+
+| LoRA | Save as | Link |
+|------|---------|------|
+| Realistic Snapshot | `RealisticSnapshot-Zimage-Turbov5.safetensors` | https://civitai.com/models/2268008?modelVersionId=2617751 |
+| Enhancer | `Enhancer.safetensors` | https://civitai.com/models/2239743?modelVersionId=2521349 |
+
+**Upload to server:**
+
+```bash
+# Replace <PORT> and <SERVER_IP> with your SSH connection details
+scp -P <PORT> ~/Downloads/real_life_qwen.safetensors root@<SERVER_IP>:/workspace/ComfyUI/models/loras/
+scp -P <PORT> ~/Downloads/Qwen_art_lora.safetensors root@<SERVER_IP>:/workspace/ComfyUI/models/loras/
+scp -P <PORT> ~/Downloads/RealisticSnapshot-Zimage-Turbov5.safetensors root@<SERVER_IP>:/workspace/ComfyUI/models/loras/
+scp -P <PORT> ~/Downloads/Enhancer.safetensors root@<SERVER_IP>:/workspace/ComfyUI/models/loras/
+```
+
+After uploading, restart ComfyUI to pick up the new LoRAs.
+
 ### Manual setup (alternative)
 
 <details>
