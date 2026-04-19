@@ -1,9 +1,8 @@
-"""Full end-to-end test: submit real LoRA + ControlNet workflows to ComfyUI
+"""Full end-to-end test: submit real LoRA workflows to ComfyUI
 and verify images are actually generated.
 
 Uses the weights downloaded by the operator into:
   - /workspace/ComfyUI/models/loras/
-  - /workspace/ComfyUI/models/model_patches/
 
 Unlike tests/e2e_lora_controlnet.py (which only checks graph structure),
 this script polls /history and confirms actual images land on disk.
@@ -261,49 +260,7 @@ def main() -> int:
     print("Qwen LoRA insert:", r.splitlines()[0])
     results["qwen+LoRA"] = _run("Qwen-Image-2512 + Lightning 4-step LoRA", wm)
 
-    # --- 2. Qwen + ControlNet (canny, no preprocessor — raw image as control) ---
-    wm = WorkflowManager(_qwen_baseline())
-    img_nid = wm.add_node("LoadImage", image="example.png")
-    r, _ = agent._dispatch(
-        "add_controlnet",
-        {
-            "controlnet_name": "qwen_image_canny_diffsynth_controlnet.safetensors",
-            "positive_node_id": "5",
-            "negative_node_id": "6",
-            "image_node_id": img_nid,
-            "strength": 0.75,
-        },
-        wm,
-    )
-    print("Qwen CN insert:", r.splitlines()[0])
-    results["qwen+CN"] = _run("Qwen-Image-2512 + Canny DiffSynth ControlNet", wm)
-
-    # --- 3. Qwen + LoRA + ControlNet (combined) ---
-    wm = WorkflowManager(_qwen_baseline())
-    agent._dispatch(
-        "add_lora_loader",
-        {
-            "lora_name": "Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors",
-            "model_node_id": "1",
-            "strength_model": 1.0,
-        },
-        wm,
-    )
-    img_nid = wm.add_node("LoadImage", image="example.png")
-    agent._dispatch(
-        "add_controlnet",
-        {
-            "controlnet_name": "qwen_image_depth_diffsynth_controlnet.safetensors",
-            "positive_node_id": "5",
-            "negative_node_id": "6",
-            "image_node_id": img_nid,
-            "strength": 0.60,
-        },
-        wm,
-    )
-    results["qwen+LoRA+CN"] = _run("Qwen-Image-2512 + LoRA + Depth CN", wm)
-
-    # --- 4. Z-Image + LoRA ---
+    # --- 2. Z-Image + LoRA ---
     wm = WorkflowManager(_zimage_baseline())
     r, _ = agent._dispatch(
         "add_lora_loader",
@@ -316,48 +273,6 @@ def main() -> int:
     )
     print("Z-Image LoRA insert:", r.splitlines()[0])
     results["zimage+LoRA"] = _run("Z-Image-Turbo + Radiant Realism LoRA", wm)
-
-    # --- 5. Z-Image + ControlNet (no preprocessor) ---
-    wm = WorkflowManager(_zimage_baseline())
-    img_nid = wm.add_node("LoadImage", image="example.png")
-    r, _ = agent._dispatch(
-        "add_controlnet",
-        {
-            "controlnet_name": "Z-Image-Turbo-Fun-Controlnet-Union-2.1.safetensors",
-            "positive_node_id": "5",
-            "negative_node_id": "6",
-            "image_node_id": img_nid,
-            "strength": 0.75,
-        },
-        wm,
-    )
-    print("Z-Image CN insert:", r.splitlines()[0])
-    results["zimage+CN"] = _run("Z-Image-Turbo + Fun ControlNet Union", wm)
-
-    # --- 6. Z-Image + LoRA + ControlNet (combined) ---
-    wm = WorkflowManager(_zimage_baseline())
-    agent._dispatch(
-        "add_lora_loader",
-        {
-            "lora_name": "Z-Image-Turbo-Realism-LoRA.safetensors",
-            "model_node_id": "1",
-            "strength_model": 0.7,
-        },
-        wm,
-    )
-    img_nid = wm.add_node("LoadImage", image="example.png")
-    agent._dispatch(
-        "add_controlnet",
-        {
-            "controlnet_name": "Z-Image-Turbo-Fun-Controlnet-Union-2.1.safetensors",
-            "positive_node_id": "5",
-            "negative_node_id": "6",
-            "image_node_id": img_nid,
-            "strength": 0.60,
-        },
-        wm,
-    )
-    results["zimage+LoRA+CN"] = _run("Z-Image-Turbo + LoRA + ControlNet combined", wm)
 
     # --- Summary ---
     print("\n" + "=" * 60)

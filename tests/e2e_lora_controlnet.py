@@ -1,6 +1,6 @@
-"""End-to-end verification of LoRA/ControlNet wiring against a live ComfyUI.
+"""End-to-end verification of LoRA wiring against a live ComfyUI.
 
-This script builds workflows with ClawAgent's LoRA/ControlNet tools for each
+This script builds workflows with ClawAgent's LoRA tools for each
 supported architecture (Qwen-Image-2512, Z-Image-Turbo, LongCat-Image, standard
 SD), then:
 
@@ -100,7 +100,7 @@ def _print_prompt_errors(resp: dict, case: str) -> None:
 
     A graph whose only errors are 'value not in list' (for missing model files)
     means the graph STRUCTURE is correct — the server just can't find the
-    weights. That's the expected state here (empty loras/, empty controlnets/).
+    weights. That's the expected state here (empty loras/).
     """
     body = resp.get("body")
     if not isinstance(body, dict):
@@ -332,7 +332,7 @@ def _longcat_baseline() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Diagnostic: show which Qwen/Z-Image CN node classes the server exposes
+# Diagnostic: show which model node classes the server exposes
 # ---------------------------------------------------------------------------
 
 
@@ -342,21 +342,8 @@ def probe_server() -> set[str]:
     classes = set(info.keys())
 
     wanted = [
-        # Standard
         "LoraLoader",
         "LoraLoaderModelOnly",
-        "ControlNetLoader",
-        "ControlNetApplyAdvanced",
-        # Agent's assumed Fun CN class names
-        "QwenImageFunControlNetLoader",
-        "QwenImageFunControlNetApply",
-        "ZImageFunControlNetLoader",
-        "ZImageFunControlNetApply",
-        # Actual Fun CN classes in this ComfyUI
-        "ZImageFunControlnet",
-        "QwenImageDiffsynthControlnet",
-        "ModelPatchLoader",
-        "SetUnionControlNetType",
     ]
     for name in wanted:
         print(f"  {'OK  ' if name in classes else 'MISS'}  {name}")
@@ -459,128 +446,7 @@ def test_longcat_lora_blocked() -> None:
     )
 
 
-def _add_loadimage(wm: WorkflowManager) -> str:
-    """Add a LoadImage node pointing at a real image on the ComfyUI server."""
-    return wm.add_node("LoadImage", image="example.png")
 
-
-def test_qwen_controlnet(server_classes: set[str]) -> None:
-    _banner("5. Qwen-Image-2512 + ControlNet (model-patch)")
-    wm = WorkflowManager(_qwen_baseline())
-    agent = _make_agent()
-    img_nid = _add_loadimage(wm)
-    result, _ = agent._dispatch(
-        "add_controlnet",
-        {
-            "controlnet_name": "qwen_image_diffsynth_canny.safetensors",
-            "positive_node_id": "5",
-            "negative_node_id": "6",
-            "image_node_id": img_nid,
-            "strength": 0.75,
-        },
-        wm,
-    )
-    print("  agent:", result.splitlines()[0])
-
-    _summarize(
-        "agent generated ModelPatchLoader",
-        len(wm.get_nodes_by_class("ModelPatchLoader")) == 1,
-    )
-    patch_nids = wm.get_nodes_by_class("QwenImageDiffsynthControlnet")
-    _summarize(
-        "agent generated QwenImageDiffsynthControlnet",
-        len(patch_nids) == 1,
-    )
-    _summarize(
-        "KSampler.model rewired to patch output",
-        patch_nids and wm.workflow["8"]["inputs"]["model"] == [patch_nids[0], 0],
-    )
-    _summarize(
-        "positive/negative conditioning unchanged",
-        wm.workflow["8"]["inputs"]["positive"] == ["5", 0]
-        and wm.workflow["8"]["inputs"]["negative"] == ["6", 0],
-    )
-    print(
-        f"  server has ModelPatchLoader={('ModelPatchLoader' in server_classes)}, "
-        f"QwenImageDiffsynthControlnet={('QwenImageDiffsynthControlnet' in server_classes)}"
-    )
-
-    resp = _post_prompt(wm.workflow)
-    print(f"  /prompt → HTTP {resp['status']}")
-    _print_prompt_errors(resp, "5")
-
-
-def test_zimage_controlnet(server_classes: set[str]) -> None:
-    _banner("6. Z-Image-Turbo + ControlNet (model-patch)")
-    wm = WorkflowManager(_zimage_baseline())
-    agent = _make_agent()
-    img_nid = _add_loadimage(wm)
-    result, _ = agent._dispatch(
-        "add_controlnet",
-        {
-            "controlnet_name": "z_image_fun_canny.safetensors",
-            "positive_node_id": "5",
-            "negative_node_id": "6",
-            "image_node_id": img_nid,
-            "strength": 0.80,
-        },
-        wm,
-    )
-    print("  agent:", result.splitlines()[0])
-    _summarize(
-        "agent generated ModelPatchLoader",
-        len(wm.get_nodes_by_class("ModelPatchLoader")) == 1,
-    )
-    patch_nids = wm.get_nodes_by_class("ZImageFunControlnet")
-    _summarize(
-        "agent generated ZImageFunControlnet",
-        len(patch_nids) == 1,
-    )
-    _summarize(
-        "KSampler.model rewired to patch output",
-        patch_nids and wm.workflow["8"]["inputs"]["model"] == [patch_nids[0], 0],
-    )
-    _summarize(
-        "positive/negative conditioning unchanged",
-        wm.workflow["8"]["inputs"]["positive"] == ["5", 0]
-        and wm.workflow["8"]["inputs"]["negative"] == ["6", 0],
-    )
-    print(
-        f"  server has ModelPatchLoader={('ModelPatchLoader' in server_classes)}, "
-        f"ZImageFunControlnet={('ZImageFunControlnet' in server_classes)}"
-    )
-
-    resp = _post_prompt(wm.workflow)
-    print(f"  /prompt → HTTP {resp['status']}")
-    _print_prompt_errors(resp, "6")
-
-
-def test_longcat_controlnet_blocked() -> None:
-    _banner("7. LongCat-Image + ControlNet (MUST be blocked)")
-    wm = WorkflowManager(_longcat_baseline())
-    agent = _make_agent()
-    result, _ = agent._dispatch(
-        "add_controlnet",
-        {
-            "controlnet_name": "whatever.safetensors",
-            "positive_node_id": "5",
-            "negative_node_id": "6",
-            "strength": 0.7,
-        },
-        wm,
-    )
-    print("  agent:", result.splitlines()[0])
-    _summarize(
-        "workflow unchanged",
-        wm.get_nodes_by_class("ControlNetLoader") == []
-        and wm.get_nodes_by_class("ModelPatchLoader") == []
-        and wm.get_nodes_by_class("QwenImageDiffsynthControlnet") == []
-        and wm.get_nodes_by_class("ZImageFunControlnet") == [],
-    )
-    _summarize(
-        "error mentions 'not supported'",
-        "not supported" in result.lower() and "longcat" in result.lower(),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -608,7 +474,7 @@ def _wait_for_prompt(prompt_id: str, timeout_s: int = 300) -> dict | None:
 
 
 def test_baseline(label: str, builder, poll: bool = False) -> None:
-    _banner(f"0.{label} Baseline sanity — {label} (no LoRA / no CN)")
+    _banner(f"0.{label} Baseline sanity — {label} (no LoRA)")
     wm = WorkflowManager(builder())
     resp = _post_prompt(wm.workflow)
     print(f"  /prompt → HTTP {resp['status']}")
@@ -656,10 +522,6 @@ def main() -> int:
     test_qwen_lora()
     test_zimage_lora()
     test_longcat_lora_blocked()
-    # ControlNet
-    test_qwen_controlnet(server_classes)
-    test_zimage_controlnet(server_classes)
-    test_longcat_controlnet_blocked()
     return 0
 
 

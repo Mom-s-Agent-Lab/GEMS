@@ -7,7 +7,7 @@ GEMS baseline: prompt-only refinement loop (plan → decompose → generate →
 verify → refine prompt).  No structural workflow changes.
 
 ComfyClaw: full topology evolution (stage-gated agent builds/modifies the
-ComfyUI workflow graph including LoRA/ControlNet/node wiring).
+ComfyUI workflow graph including LoRA/node wiring).
 
 This isolates the key contribution: workflow-level agency vs prompt-level agency.
 """

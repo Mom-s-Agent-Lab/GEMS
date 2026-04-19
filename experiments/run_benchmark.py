@@ -280,6 +280,203 @@ def synthesize_learned_skill(new_errors: list[dict], learned_dir: str) -> bool:
         return False
 
 
+_TRIVIAL_TOOLS = frozenset({
+    "set_prompt", "set_param", "finalize_workflow",
+    "report_evolution_strategy", "inspect_workflow",
+    "validate_workflow",
+})
+
+
+def _collect_success_data(result: dict, prompt_dir: str) -> dict | None:
+    """Extract tool-call sequences and strategy data from a high-scoring prompt.
+
+    Returns None if the result used only trivial tools (set_prompt/set_param).
+    Captures full arguments for non-trivial tools (LoRA, etc.)
+    so the success synthesiser can learn specific configurations.
+    """
+    details_path = os.path.join(prompt_dir, "details.json")
+    sft_path = os.path.join(prompt_dir, "sft_traces.jsonl")
+
+    tool_sequence: list[str] = []
+    tool_details: list[dict] = []
+    best_rationale = ""
+
+    if os.path.exists(sft_path):
+        best_score = -1.0
+        best_tools: list[str] = []
+        best_details: list[dict] = []
+        with open(sft_path, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    trace = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                vs = trace.get("verifier_score", 0) or 0
+                tools_in_trace: list[str] = []
+                details_in_trace: list[dict] = []
+                for msg in trace.get("messages", []):
+                    if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                        for tc in msg["tool_calls"]:
+                            fn = tc.get("function", {}).get("name", "")
+                            if not fn:
+                                continue
+                            tools_in_trace.append(fn)
+                            if fn not in _TRIVIAL_TOOLS:
+                                raw_args = tc["function"].get("arguments", "")
+                                try:
+                                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                                except (json.JSONDecodeError, TypeError):
+                                    args = {"_raw": str(raw_args)[:200]}
+                                details_in_trace.append({
+                                    "tool": fn,
+                                    "args": {
+                                        k: (v if len(str(v)) < 200 else str(v)[:200] + "...")
+                                        for k, v in (args if isinstance(args, dict) else {}).items()
+                                    },
+                                })
+                if vs > best_score:
+                    best_score = vs
+                    best_tools = tools_in_trace
+                    best_details = details_in_trace
+            tool_sequence = best_tools
+            tool_details = best_details
+
+    if os.path.exists(details_path):
+        try:
+            with open(details_path) as f:
+                details = json.load(f)
+            best_iter = details.get("best_iteration")
+            if best_iter is not None:
+                for it in details.get("iterations", []):
+                    if it.get("iteration") == best_iter:
+                        best_rationale = it.get("agent_rationale") or ""
+                        break
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    non_trivial = [t for t in tool_sequence if t not in _TRIVIAL_TOOLS]
+    if not non_trivial:
+        return None
+
+    return {
+        "prompt": result.get("prompt", ""),
+        "best_score": result.get("best_score", 0),
+        "passed": result.get("passed", []),
+        "tool_sequence": tool_sequence,
+        "non_trivial_tools": non_trivial,
+        "tool_details": tool_details,
+        "rationale": best_rationale,
+        "node_count": result.get("node_count", 0),
+    }
+
+
+def synthesize_success_patterns(
+    success_entries: list[dict], learned_dir: str
+) -> bool:
+    """Synthesize a 'learned-successes' skill from high-scoring prompt data.
+
+    Parallel to ``synthesize_learned_skill`` but learns from wins, not errors.
+    """
+    import litellm
+
+    skill_dir = Path(learned_dir).parent / "learned-successes"
+    skill_path = skill_dir / "SKILL.md"
+
+    existing_body = ""
+    if skill_path.exists():
+        existing_body = skill_path.read_text(encoding="utf-8")
+
+    parts: list[str] = []
+    for e in success_entries:
+        line = (
+            f"- Prompt: {e['prompt'][:80]} | Score: {e['best_score']:.2f} | "
+            f"Key tools: {', '.join(e['non_trivial_tools'][:5])}"
+        )
+        if e.get("rationale"):
+            line += f" | Rationale: {e['rationale'][:150]}"
+        td = e.get("tool_details", [])
+        if td:
+            detail_strs = []
+            for d in td[:5]:
+                args_snippet = json.dumps(d["args"], default=str)
+                if len(args_snippet) > 150:
+                    args_snippet = args_snippet[:150] + "..."
+                detail_strs.append(f"  {d['tool']}({args_snippet})")
+            line += "\n" + "\n".join(detail_strs)
+        parts.append(line)
+    success_summary = "\n".join(parts)
+
+    prompt_text = (
+        "You are maintaining a ComfyUI workflow best-practices skill for an AI agent.\n"
+        "The agent builds and modifies ComfyUI node-graph workflows. Your job is to write a "
+        "concise SKILL.md that teaches the agent to replicate successful strategies.\n\n"
+    )
+
+    if existing_body:
+        prompt_text += (
+            "Here is the EXISTING skill content:\n"
+            f"```\n{existing_body}\n```\n\n"
+            "NEW successful patterns observed since last update:\n"
+            f"{success_summary}\n\n"
+            "Update the skill to incorporate these new successful patterns. "
+            "Merge with existing content — don't lose previously learned patterns. "
+            "Remove duplicates. Keep it concise and actionable.\n\n"
+        )
+    else:
+        prompt_text += (
+            "Successful strategies observed during workflow generation:\n"
+            f"{success_summary}\n\n"
+            "Create a NEW skill from these successful patterns.\n\n"
+        )
+
+    prompt_text += (
+        "Output ONLY the complete SKILL.md content. It MUST follow this exact format:\n"
+        "1. Start with YAML frontmatter between --- delimiters\n"
+        "2. The 'name' field MUST be exactly 'learned-successes'\n"
+        "3. The 'description' field should explain what proven strategies this skill teaches\n"
+        "4. After the frontmatter, write clear Markdown instructions\n\n"
+        "Focus on:\n"
+        "- Which tools and node configurations produced the best results\n"
+        "- Effective parameter values (guidance, steps, sampler settings)\n"
+        "- LoRA usage: which LoRA checkpoints worked, at what strength, for which prompt types\n"
+        "- Successful prompt engineering patterns\n"
+        "- Workflow topology patterns that consistently improve scores\n"
+        "- When to use specific techniques (e.g. regional attention for multi-object scenes)\n\n"
+        "Keep it under 150 lines. Be specific with tool names, node classes, parameter values, "
+        "and LoRA checkpoint names."
+    )
+
+    try:
+        resp = litellm.completion(
+            model=LLM_MODEL,
+            api_key=LLM_API_KEY,
+            **({"api_base": LLM_API_BASE} if LLM_API_BASE else {}),
+            messages=[{"role": "user", "content": prompt_text}],
+            max_tokens=2000,
+        )
+        skill_content = resp.choices[0].message.content.strip()
+
+        if skill_content.startswith("```"):
+            skill_content = re.sub(r"^```\w*\n?", "", skill_content)
+            skill_content = re.sub(r"\n?```$", "", skill_content)
+
+        if not skill_content.startswith("---"):
+            log.warning("  Synthesized success skill missing frontmatter, skipping")
+            return False
+
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_path.write_text(skill_content, encoding="utf-8")
+        log.info("  Wrote learned-successes skill to %s (%d lines)",
+                 skill_path, skill_content.count("\n") + 1)
+        return True
+
+    except Exception as exc:
+        log.warning("  Failed to synthesize success skill: %s", exc)
+        return False
+
+
 # ── Core: run a single prompt ─────────────────────────────────────────────
 
 def run_one(
@@ -453,6 +650,7 @@ def run_one(
         "image_path": img_path,
         "error_data": error_data,
         "sft_trace_count": len(sft_traces),
+        "skills_read": list(harness.skills_read),
     }
 
 
@@ -475,6 +673,28 @@ def run_batch_evolution(results: list[dict], cycle: int, evolved_dir: str) -> No
                  report.mutations_accepted)
     else:
         log.info("  No mutations accepted this cycle")
+
+    report_path = os.path.join(evolved_dir, "evolution_reports.jsonl")
+    try:
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "cycle": report.cycle,
+                "pre_mean_score": report.pre_mean_score,
+                "post_mean_score": report.post_mean_score,
+                "mutations_proposed": report.mutations_proposed,
+                "mutations_accepted": report.mutations_accepted,
+                "mutations_rejected": report.mutations_rejected,
+                "n_failure_clusters": len(report.failure_clusters),
+                "n_success_clusters": len(report.success_clusters),
+                "reinforce_mutations": report.reinforce_mutations,
+                "duration_s": report.duration_s,
+                "accepted_skills": [
+                    {"type": m.mutation_type, "targets": m.target_skills}
+                    for m in report.mutations if m.accepted
+                ],
+            }) + "\n")
+    except Exception as exc:
+        log.warning("Failed to persist evolution report: %s", exc)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────
@@ -609,6 +829,8 @@ def main():
     results_lock = threading.Lock()
     pending_errors: list[dict] = []
     errors_lock = threading.Lock()
+    pending_successes: list[dict] = []
+    successes_lock = threading.Lock()
 
     def _run_and_record(i: int, prompt_text: str, server_address: str) -> None:
         tag = f"[idx={i:03d}]"
@@ -639,6 +861,23 @@ def main():
                              tag, len(r["error_data"]))
                     synthesize_learned_skill(pending_errors, paths["learned_skills_dir"])
                     pending_errors.clear()
+
+            if r["best_score"] >= 0.9 and r.get("sft_trace_count", 0) > 0:
+                prompt_dir = os.path.join(
+                    paths["detailed_dir"],
+                    f"prompt_{i:03d}_{_slug(prompt_text)}"
+                )
+                sdata = _collect_success_data(r, prompt_dir)
+                if sdata:
+                    with successes_lock:
+                        pending_successes.append(sdata)
+                        if len(pending_successes) >= 3:
+                            log.info("%s Synthesizing success patterns from %d entries",
+                                     tag, len(pending_successes))
+                            synthesize_success_patterns(
+                                pending_successes, paths["learned_skills_dir"]
+                            )
+                            pending_successes.clear()
 
         except Exception as exc:
             log.error("%s FAILED: %s", tag, exc, exc_info=True)

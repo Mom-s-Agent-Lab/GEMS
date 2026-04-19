@@ -14,8 +14,9 @@ metadata:
   diffusion_model: qwen_image_2512_fp8_e4m3fn.safetensors  → ComfyUI/models/diffusion_models/
   text_encoder:    qwen_2.5_vl_7b_fp8_scaled.safetensors   → ComfyUI/models/text_encoders/
   vae:             qwen_image_vae.safetensors                → ComfyUI/models/vae/
-  optional_lora:   Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors → ComfyUI/models/loras/
-  optional_controlnet: qwen_image_canny_diffsynth_controlnet.safetensors, qwen_image_depth_diffsynth_controlnet.safetensors → ComfyUI/models/model_patches/
+  optional_lora:   real_life_qwen.safetensors → ComfyUI/models/loras/
+  optional_lora_2: Qwen_art_lora.safetensors → ComfyUI/models/loras/
+  optional_lora_3: Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors → ComfyUI/models/loras/
 tags: [agent, "model:qwen"]
 ---
 
@@ -33,8 +34,6 @@ FP8 quantized weights (~28 GB total, fits in 45 GB VRAM).
 | Latent space | `EmptyLatentImage` | `EmptySD3LatentImage` |
 | Model conditioning | — | `ModelSamplingAuraFlow` (required, `shift`≈3.1) |
 | LoRA node | `LoraLoader` (MODEL+CLIP) | `LoraLoaderModelOnly` (MODEL only) |
-| ControlNet loader | `ControlNetLoader` | `ModelPatchLoader` (loads the CN patch file) |
-| ControlNet apply | `ControlNetApplyAdvanced` (patches conditioning) | `QwenImageDiffsynthControlnet` (patches the MODEL tensor) |
 | Typical steps | 20–30 | **4** (speed LoRA) / **8** (turbo) / **50** (standard) |
 | Typical CFG | 7.0 | **1.0** (speed LoRA) / **4.0** (standard) |
 | Sampler | `euler_ancestral` | `euler` |
@@ -66,25 +65,6 @@ UNETLoader
                       └──► ModelSamplingAuraFlow (shift=3.1)
                                └──► KSampler ...
 ```
-
-### With DiffSynth ControlNet (model-patch style)
-
-Qwen-Image-2512 ControlNet does **not** wrap positive/negative conditioning.
-Instead it patches the MODEL tensor itself with a reference image:
-
-```
-UNETLoader ──► [LoRA chain] ──► QwenImageDiffsynthControlnet ──► ModelSamplingAuraFlow ──► KSampler
-                                       ▲    ▲    ▲
-                                       │    │    └── LoadImage (control reference, e.g. canny / depth map)
-                                       │    └────── VAELoader
-                                       └──────────  ModelPatchLoader (qwen_image_*_diffsynth_controlnet.safetensors)
-
-CLIPTextEncode (positive) ──► KSampler.positive   (unchanged — no conditioning wrap)
-CLIPTextEncode (negative) ──► KSampler.negative   (unchanged)
-```
-
-Because the MODEL is patched, `add_controlnet` **requires an `image_node_id`**
-(LoadImage / VAEDecode) and the workflow **must contain a VAELoader**.
 
 ---
 
@@ -241,6 +221,8 @@ steps=4, cfg=1.0, sampler_name="euler", scheduler="simple"
 
 | LoRA | Trigger word | strength_model | Notes |
 |---|---|---|---|
+| **Real Life LoRA Qwen** (oleshevakatya) | — | 0.8–1.0 | Natural skin, accurate lighting, photorealism; `real_life_qwen.safetensors` (~203 MB, Civitai #2056953) |
+| **Qwen Aesthetic** (bunny123) | — | 0.5–1.0 | General aesthetic quality boost, wider stylistic range; `Qwen_art_lora.safetensors` (~563 MB, Civitai #2010520) |
 | Qwen-Image Realism (flymy-ai) | `realism` | 0.8–1.0 | Improved skin, facial detail; cfg=5.0 |
 | NiceGirls UltraReal | — | 0.7–1.0 | European feminine portraiture |
 | NSGIRL UltraRealistic | — | 0.8–1.0 | 10K-step training, BF16 |
@@ -325,185 +307,7 @@ set_param("<CLIPTextEncode positive node ID>", "text",
 
 ---
 
-## 7. ControlNet — complete guide
-
-### Architecture note
-
-Qwen-Image-2512 uses the **DiffSynth block-wise ControlNet** format, wired as a
-**model-patch** rather than a conditioning-patch. This is **not compatible** with
-standard SD/SDXL ControlNets or with Fun-style ControlNets for video models.
-
-**ComfyUI nodes used** (both are built-in — no custom_nodes install needed):
-- Loader: `ModelPatchLoader` (generic — loads any patch file from
-  `ComfyUI/models/model_patches/`)
-- Apply: `QwenImageDiffsynthControlnet`
-  - Inputs: `model`, `model_patch`, `vae`, `image`, `strength`
-  - Output: a patched `MODEL`
-  - The output MODEL replaces the original MODEL at every downstream consumer
-    (KSampler, ModelSamplingAuraFlow, etc.).
-
-The harness auto-detects Qwen and uses these nodes when you call
-`add_controlnet`. You do **not** pass `union_type` — DiffSynth ControlNets bake
-the control mode into the file itself (one file per mode).
-
----
-
-### 7.1 Available model files (place in `ComfyUI/models/model_patches/`)
-
-| File | Size | Control mode | Source |
-|---|---|---|---|
-| `qwen_image_canny_diffsynth_controlnet.safetensors` | 2.2 GB | Canny edges | `Comfy-Org/Qwen-Image_ComfyUI` |
-| `qwen_image_depth_diffsynth_controlnet.safetensors` | 2.2 GB | Depth map | `Comfy-Org/Qwen-Image_ComfyUI` |
-
-Older `Qwen-Image-2512-Fun-Controlnet-Union-*.safetensors` files from
-`alibaba-pai` are for video pipelines and are **not** loaded by
-`ModelPatchLoader`; don't put them in `model_patches/`.
-
----
-
-### 7.2 Control modes
-
-The mode is fixed by the chosen file — there is no `union_type` switch.
-
-| File | Control signal | Preprocessor class | Use case |
-|---|---|---|---|
-| `qwen_image_canny_diffsynth_controlnet.safetensors` | Edge map | `CannyEdgePreprocessor` (or `""` to use raw image) | Preserve structure/outlines |
-| `qwen_image_depth_diffsynth_controlnet.safetensors` | Depth map | `MiDaS-DepthMapPreprocessor` / `DepthAnythingV2Preprocessor` (or `""`) | Fix 3D layout, foreground/bg |
-
-**Preprocessor nodes** are provided by the `comfyui_controlnet_aux` custom
-package (Fannovel16). If it isn't installed, pass `preprocessor_class=""` and
-supply an already-processed image (e.g. a canny map PNG) to `image_node_id`.
-
----
-
-### 7.3 Parameters
-
-| Parameter | Node input name | Range | Default | Notes |
-|---|---|---|---|---|
-| Control strength | `strength` | 0.0–1.0 (typ.) | 0.8 | Direct multiplier on the patch contribution |
-| `union_type` | — | — | — | **Not used** for DiffSynth CNs |
-| `start_percent` / `end_percent` | — | — | — | Not applied by the patch node; schedule is baked in |
-
-**Strength guidelines by use case:**
-
-| Scenario | strength |
-|---|---|
-| Loose composition hint | 0.40–0.60 |
-| Balanced (default) | 0.70–0.85 |
-| Strict structure enforcement | 0.90–1.0 |
-
-`start_percent` / `end_percent` are accepted by `add_controlnet` for API
-symmetry but are **not forwarded** to `QwenImageDiffsynthControlnet` — it has no
-schedule inputs.
-
----
-
-### 7.4 Adding ControlNet with `add_controlnet`
-
-```
-# Step 1: check what patch files are installed
-query_available_models("controlnets")     # surfaces both controlnets/ and model_patches/
-
-# Step 2: add the DiffSynth ControlNet branch
-add_controlnet(
-    controlnet_name    = "qwen_image_canny_diffsynth_controlnet.safetensors",
-    preprocessor_class = "CannyEdgePreprocessor",   # or "" to pass a pre-computed canny map
-    image_node_id      = "<LoadImage or VAEDecode node ID>",   # REQUIRED
-    positive_node_id   = "<CLIPTextEncode positive node ID>",  # required for API symmetry
-    negative_node_id   = "<CLIPTextEncode negative node ID>",  # required for API symmetry
-    strength           = 0.8,
-)
-```
-
-The harness:
-1. Adds `ModelPatchLoader(name=<controlnet_name>)` — loads the patch file
-2. Adds the preprocessor node (if `preprocessor_class` is set)
-3. Adds `QwenImageDiffsynthControlnet` with `(model, model_patch, vae, image, strength)`
-4. **Rewires every downstream consumer of the source MODEL** (KSampler,
-   ModelSamplingAuraFlow, …) to consume the patched MODEL instead
-5. Leaves positive/negative CLIP conditioning untouched
-
-> Requires a `VAELoader` already present in the workflow (the patch node
-> consumes VAE). If none exists, the agent will error with a clear message —
-> add one first.
-
----
-
-### 7.5 Mode-specific examples
-
-#### Canny (edge structure)
-```
-add_controlnet(
-    controlnet_name    = "qwen_image_canny_diffsynth_controlnet.safetensors",
-    preprocessor_class = "CannyEdgePreprocessor",
-    image_node_id      = "<source image node>",
-    positive_node_id   = "<pos node>",
-    negative_node_id   = "<neg node>",
-    strength           = 0.80,
-)
-```
-
-#### Depth (3D layout)
-```
-add_controlnet(
-    controlnet_name    = "qwen_image_depth_diffsynth_controlnet.safetensors",
-    preprocessor_class = "MiDaS-DepthMapPreprocessor",
-    image_node_id      = "<source image node>",
-    positive_node_id   = "<pos node>",
-    negative_node_id   = "<neg node>",
-    strength           = 0.85,
-)
-```
-
-#### Pre-processed control map (no preprocessor node installed)
-```
-add_controlnet(
-    controlnet_name    = "qwen_image_canny_diffsynth_controlnet.safetensors",
-    preprocessor_class = "",                       # pass the image unchanged
-    image_node_id      = "<LoadImage node with pre-baked canny map>",
-    positive_node_id   = "<pos node>",
-    negative_node_id   = "<neg node>",
-    strength           = 0.80,
-)
-```
-
-> Qwen-Image DiffSynth ControlNet only ships canny and depth weights today.
-> Pose / seg / normal are **not** available for Qwen-Image-2512 — prefer a
-> LoRA-based fix for pose defects.
-
----
-
-### 7.6 ControlNet + LoRA together
-
-LoRA and ControlNet are independent patches on the MODEL branch — LoRA runs
-first in the chain, then the DiffSynth patch:
-
-```
-# 1. Add speed LoRA (model side)
-add_lora_loader(
-    lora_name      = "Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors",
-    model_node_id  = "<UNETLoader ID>",
-    strength_model = 1.0,
-)
-
-# 2. Add ControlNet (also on the MODEL branch — harness finds the current MODEL source)
-add_controlnet(
-    controlnet_name    = "qwen_image_depth_diffsynth_controlnet.safetensors",
-    preprocessor_class = "MiDaS-DepthMapPreprocessor",
-    image_node_id      = "<source image>",
-    positive_node_id   = "<pos node>",
-    negative_node_id   = "<neg node>",
-    strength           = 0.80,
-)
-
-# 3. Set Lightning sampler settings
-set_param("<KSampler ID>", "steps", 4)
-set_param("<KSampler ID>", "cfg",   1.0)
-```
-
----
-
-## 8. Iteration strategy
+## 7. Iteration strategy
 
 | Verifier issue | Fix strategy |
 |---|---|
@@ -517,10 +321,6 @@ set_param("<KSampler ID>", "cfg",   1.0)
 | Style LoRA too strong | Reduce `strength_model` to 0.5–0.6 |
 | Style LoRA too weak | Raise to 0.85–1.0; add trigger word to positive prompt |
 | FP8 LoRA artefacts | LoRA incompatible with FP8; switch UNETLoader weight_dtype to "bf16" |
-| ControlNet too rigid | Lower `strength` to ~0.5–0.6 |
-| ControlNet too weak | Raise `strength` to 0.9–1.0 |
-| ControlNet wrong mode | Swap to the matching patch file (canny ↔ depth); no `union_type` on Qwen |
-| ControlNet node error "needs a VAELoader" | Add a `VAELoader` in the workflow and connect it upstream of VAEDecode |
 
 ---
 
@@ -586,28 +386,3 @@ set_param("<KSampler>", "cfg",   1.0)
 finalize_workflow()
 ```
 
-### Example C — ControlNet depth + Lightning LoRA
-
-```
-# Add LoRA
-add_lora_loader(
-    lora_name      = "Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors",
-    model_node_id  = "<UNETLoader ID>",
-    strength_model = 1.0,
-)
-
-# Add DiffSynth ControlNet (depth mode)
-add_controlnet(
-    controlnet_name    = "qwen_image_depth_diffsynth_controlnet.safetensors",
-    preprocessor_class = "MiDaS-DepthMapPreprocessor",
-    image_node_id      = "<LoadImage with reference photo>",
-    positive_node_id   = "<pos CLIPTextEncode ID>",
-    negative_node_id   = "<neg CLIPTextEncode ID>",
-    strength           = 0.82,
-)
-
-set_param("<KSampler>", "steps", 4)
-set_param("<KSampler>", "cfg",   1.0)
-
-finalize_workflow()
-```

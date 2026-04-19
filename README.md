@@ -9,7 +9,7 @@
 
 ComfyClaw wraps ComfyUI in an LLM agent loop that _builds and grows_ workflow
 topologies in response to image quality feedback — constructing pipelines from
-scratch or adding LoRA loaders, ControlNet branches, regional conditioning, and
+scratch or adding LoRA loaders, regional conditioning, and
 hires-fix passes until a configurable quality threshold is reached.
 
 ### Key features
@@ -64,7 +64,7 @@ hires-fix passes until a configurable quality threshold is reached.
 - [Python API](#python-api)
 - [Architecture](#architecture)
 - [Skills](#skills)
-- [LoRA & ControlNet](docs/LORA_CONTROLNET.md)
+- [LoRA](docs/LORA_CONTROLNET.md)
 - [Development](#development)
 - [Project structure](#project-structure)
 
@@ -529,7 +529,7 @@ comfyclaw run \
 | Iteration | Score | Notes |
 |-----------|-------|-------|
 | 1 | 0.36 | Atmosphere present; missing neon, reflections |
-| 2 | 0.36 | Agent planned ControlNet but failed to execute tool calls |
+| 2 | 0.36 | Agent planned structural upgrade but failed to execute tool calls |
 | 3 | **0.49** | Rain/reflections improved; neon still weak |
 
 **Takeaway:** Gemma4 is a capable *vision verifier* but less reliable at
@@ -592,7 +592,7 @@ workflow snapshot** so far:
 
 ```
 Iter 1:  base(3 nodes) → +LoRA         → 4 nodes   score=0.62
-Iter 2:  4-node snapshot → +ControlNet → 6 nodes   score=0.81
+Iter 2:  4-node snapshot → +regional   → 6 nodes   score=0.81
 Iter 3:  6-node snapshot → +hires-fix  → 8 nodes   score=0.91 ✅
 ```
 
@@ -683,14 +683,13 @@ Bidirectional communication between the Python process and ComfyUI extension:
 | Category | Tool | Purpose |
 |---|---|---|
 | Inspect | `inspect_workflow` | Show all nodes and connections |
-| Inspect | `query_available_models` | List installed models/LoRAs/ControlNets |
+| Inspect | `query_available_models` | List installed models/LoRAs |
 | Validate | `validate_workflow` | Check dangling refs, wrong slots, missing outputs |
 | Basic | `set_param` | Set a scalar input |
 | Basic | `add_node` | Append a new node |
 | Basic | `connect_nodes` | Wire output → input |
 | Basic | `delete_node` | Remove node + clean up links |
 | LoRA | `add_lora_loader` | Insert LoRA with auto re-wiring |
-| ControlNet | `add_controlnet` | Add ControlNet pipeline |
 | Regional | `add_regional_attention` | Foreground/background conditioning split |
 | Refinement | `add_hires_fix` | Upscale + second KSampler |
 | Refinement | `add_inpaint_pass` | Targeted region inpainting |
@@ -726,8 +725,7 @@ Each skill is a directory with a `SKILL.md` file containing YAML frontmatter.
 | `creative` | "creative", "artistic", "fantasy", "concept art" |
 | `prompt-artist` | Advanced prompt engineering techniques |
 | `lora-enhancement` | Texture / lighting / anatomy defects |
-| `controlnet-control` | Flat background, blurry edges, wrong pose |
-| `qwen-image-2512` / `z-image-turbo` | Per-model recipes including LoRA & ControlNet wiring (see [docs/LORA_CONTROLNET.md](docs/LORA_CONTROLNET.md)) |
+| `qwen-image-2512` / `z-image-turbo` | Per-model recipes including LoRA wiring (see [docs/LORA_CONTROLNET.md](docs/LORA_CONTROLNET.md)) |
 | `regional-control` | Subject–background style bleed |
 | `hires-fix` | Low resolution, soft detail |
 | `spatial` | Multiple objects with spatial relationships |
@@ -752,7 +750,7 @@ description: >-
 
 1. Append `, dramatic studio lighting, rim light, catchlights` to the positive prompt.
 2. Set KSampler CFG to 8.0–9.0.
-3. Consider adding a normal-map ControlNet for skin texture depth.
+3. Consider adding a detail LoRA for skin texture improvement.
 ```
 
 ```bash
@@ -882,7 +880,7 @@ reliability:
 | **Loading** | `add_node`, `set_param`, `query_available_models` | Load checkpoints, UNET, CLIP, VAE |
 | **Conditioning** | `add_node`, `set_param`, `connect_nodes` | Build positive/negative prompt encoders |
 | **Sampling** | `add_node`, `set_param`, `connect_nodes` | Configure KSampler, scheduler, CFG |
-| **Enhancement** | `add_lora_loader`, `add_controlnet`, `add_regional_attention` | Add LoRA, ControlNet, regional control |
+| **Enhancement** | `add_lora_loader`, `add_regional_attention` | Add LoRA, regional control |
 | **Refinement** | `add_hires_fix`, `add_inpaint_pass` | Upscaling, inpainting passes |
 | **Decoding** | `add_node`, `connect_nodes` | VAE decode, image post-processing |
 | **Output** | `finalize_workflow` | Save image, validate graph |
@@ -904,7 +902,7 @@ reliability:
 
 ```
 Iter 1:  base(7 nodes)  → +LoRA         → 8 nodes   score=0.52
-Iter 2:  8-node snapshot → +ControlNet  → 11 nodes  score=0.74
+Iter 2:  8-node snapshot → +regional    → 11 nodes  score=0.74
 Iter 3:  11-node snapshot → +hires-fix  → 14 nodes  score=0.91 ✅
 ```
 

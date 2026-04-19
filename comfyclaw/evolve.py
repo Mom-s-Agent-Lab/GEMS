@@ -59,10 +59,24 @@ class FailureCluster:
 
 
 @dataclass
+class SuccessCluster:
+    """A group of high-scoring results sharing a common strategy pattern."""
+
+    name: str
+    description: str
+    success_count: int
+    affected_prompts: list[str]
+    mean_score: float
+    example_strategies: list[str]
+    key_tools: list[str] = field(default_factory=list)
+    existing_skill: str | None = None
+
+
+@dataclass
 class MutationProposal:
     """A proposed change to the skill set."""
 
-    mutation_type: str  # create | update | merge | delete
+    mutation_type: str  # create | update | merge | delete | reinforce
     target_skills: list[str]
     rationale: str
     failure_cluster: str
@@ -88,6 +102,8 @@ class EvolutionReport:
     mutations: list[MutationProposal]
     duration_s: float = 0.0
     complexity_penalty_applied: float = 0.0
+    success_clusters: list[SuccessCluster] = field(default_factory=list)
+    reinforce_mutations: int = 0
 
     def summary(self) -> str:
         delta = self.post_mean_score - self.pre_mean_score
@@ -95,10 +111,12 @@ class EvolutionReport:
         lines = [
             f"Cycle {self.cycle}: score {self.pre_mean_score:.4f} -> "
             f"{self.post_mean_score:.4f} ({sign}{delta:.4f})",
-            f"  Clusters: {len(self.failure_clusters)}",
+            f"  Failure clusters: {len(self.failure_clusters)}",
+            f"  Success clusters: {len(self.success_clusters)}",
             f"  Mutations: {self.mutations_proposed} proposed, "
             f"{self.mutations_accepted} accepted, "
-            f"{self.mutations_rejected} rejected",
+            f"{self.mutations_rejected} rejected"
+            f" ({self.reinforce_mutations} reinforce)",
             f"  Duration: {self.duration_s:.1f}s",
         ]
         if self.complexity_penalty_applied > 0:
@@ -136,19 +154,23 @@ Rules:
 """
 
 _PROPOSE_MUTATION_PROMPT = """\
-You are a skill evolution engine. Given this failure cluster and the current
-skill set, propose a skill mutation to address the failures.
+You are a skill evolution engine. Given this cluster and the current
+skill set, propose a skill mutation.
 
-Failure cluster: {cluster_json}
+Cluster: {cluster_json}
 
-Current skills and their descriptions:
-{skills_manifest}
+Built-in skills (curated, do NOT duplicate or override these):
+{builtin_skills_manifest}
+
+Evolved skills (auto-generated, can be updated/merged/deleted):
+{evolved_skills_manifest}
 
 Mutation types:
-- "create": New skill for an uncovered failure pattern
+- "create": New skill for an uncovered pattern
 - "update": Improve an existing skill's instructions
 - "merge": Combine overlapping skills
 - "delete": Remove a skill that is not helping
+- "reinforce": Codify a successful strategy as a reusable skill or strengthen an existing skill with proven techniques
 
 Return ONLY a JSON object (no markdown fences, no explanation before/after):
 {{
@@ -163,11 +185,49 @@ Return ONLY a JSON object (no markdown fences, no explanation before/after):
 }}
 
 Rules:
-- For "update", provide the improved body text.
-- For "merge", provide the merged skill content.
-- For "delete", target_skills lists which to remove; proposed_changes can be empty.
+- NEVER create a skill that restates what a built-in skill already covers. \
+Built-in skills are authoritative — evolved skills must add NEW knowledge on top.
+- If the cluster's failures relate to a built-in skill's domain, prefer "update" on \
+an existing evolved skill or "create" a NARROW evolved skill that references the \
+built-in skill by name (e.g. "Apply regional-control first, then additionally ...").
+- The body MUST start with a "## Complements" section listing built-in skills the \
+agent should read first, e.g. "## Complements\\nRead `regional-control` and `spatial` \
+before applying this skill."
+- Only target evolved skills for "update", "merge", or "delete" — never modify built-in skills.
+- For "reinforce", codify proven successful strategies into a new or existing skill. \
+Include specific tool sequences, parameter values, and node configurations that worked.
 - The "body" field MUST be a single JSON string — escape newlines as \\n.
 - Keep the body concise (under 3000 chars) with actionable node-level instructions.
+- Return valid JSON only — no trailing commas, no comments.
+"""
+
+_CLUSTER_SUCCESSES_PROMPT = """\
+You are an expert at analyzing image generation successes. Given the following
+high-scoring benchmark results (prompt, score, tools used, rationale),
+identify reusable strategy patterns that the agent can apply to future prompts.
+
+Results:
+{results_json}
+
+Available skills: {skill_names}
+
+Return ONLY a JSON array (no markdown fences, no explanation before/after):
+[
+  {{
+    "name": "pattern_name_snake_case",
+    "description": "What strategy made these prompts succeed",
+    "prompt_indices": [0, 2, 5],
+    "key_tools": ["tool1", "tool2"],
+    "existing_skill": "skill-name or null if no existing skill covers this"
+  }}
+]
+
+Rules:
+- Focus on actionable patterns an agent can replicate on new prompts.
+- Ignore trivially easy prompts (cluster must have >=3 prompts).
+- Look for common tool sequences, node configurations, or parameter strategies.
+- If a pattern already matches an existing skill, set existing_skill to that skill name.
+- Keep cluster names as snake_case identifiers.
 - Return valid JSON only — no trailing commas, no comments.
 """
 
@@ -209,6 +269,8 @@ class SkillEvolver:
     max_mutations_per_cycle : Maximum mutations to attempt per cycle.
     complexity_penalty : Per-excess-node score penalty (0 = disabled).
     baseline_nodes : Reference node count for complexity penalty.
+    success_threshold : Minimum score to consider a result a "success" for
+                        pattern extraction (default 0.9).
     """
 
     def __init__(
@@ -221,6 +283,7 @@ class SkillEvolver:
         max_mutations_per_cycle: int = 3,
         complexity_penalty: float = 0.02,
         baseline_nodes: int = 10,
+        success_threshold: float = 0.9,
     ) -> None:
         self.evolved_skills_dir = Path(evolved_skills_dir) if evolved_skills_dir else _EVOLVED_SKILLS_DIR
         self.evolved_skills_dir.mkdir(parents=True, exist_ok=True)
@@ -232,6 +295,7 @@ class SkillEvolver:
         self.max_mutations_per_cycle = max_mutations_per_cycle
         self.complexity_penalty = complexity_penalty
         self.baseline_nodes = baseline_nodes
+        self.success_threshold = success_threshold
 
         if api_key:
             from .agent import _set_llm_api_key
@@ -265,10 +329,27 @@ class SkillEvolver:
         pre_mean = self._mean_score(results)
         log.info("Cycle %d: pre-evolution mean score = %.4f", cycle, pre_mean)
 
-        # Step 1: Cluster failures
-        failures = [r for r in results if r.get("score", 0) < 0.7]
-        if not failures:
+        # Step 1a: Cluster failures
+        failures = [r for r in results if r.get("score", r.get("best_score", 0)) < 0.7]
+        failure_clusters: list[FailureCluster] = []
+        if failures:
+            failure_clusters = self._cluster_failures(failures)
+            log.info("Found %d failure clusters", len(failure_clusters))
+        else:
             log.info("No significant failures to address (all scores >= 0.7)")
+
+        # Step 1b: Cluster successes
+        successes = [
+            r for r in results
+            if r.get("score", r.get("best_score", 0)) >= self.success_threshold
+        ]
+        success_clusters: list[SuccessCluster] = []
+        if successes:
+            success_clusters = self._cluster_successes(successes)
+            log.info("Found %d success clusters from %d high-scoring results",
+                     len(success_clusters), len(successes))
+
+        if not failure_clusters and not success_clusters:
             return EvolutionReport(
                 cycle=cycle,
                 pre_mean_score=pre_mean,
@@ -281,21 +362,29 @@ class SkillEvolver:
                 duration_s=time.time() - t0,
             )
 
-        clusters = self._cluster_failures(failures)
-        log.info("Found %d failure clusters", len(clusters))
-
-        # Step 2: Propose mutations
+        # Step 2: Propose mutations from both failures and successes
         mutations: list[MutationProposal] = []
-        for cluster in clusters[: self.max_mutations_per_cycle]:
+        reinforce_count = 0
+
+        for cluster in failure_clusters[: self.max_mutations_per_cycle]:
             proposal = self._propose_mutation(cluster)
             if proposal:
                 proposal.pre_score = pre_mean
                 mutations.append(proposal)
 
+        remaining_slots = max(0, self.max_mutations_per_cycle - len(mutations))
+        reinforce_slots = max(1, remaining_slots) if success_clusters else 0
+        for cluster in success_clusters[:reinforce_slots]:
+            proposal = self._propose_reinforce_mutation(cluster)
+            if proposal:
+                proposal.pre_score = pre_mean
+                mutations.append(proposal)
+                reinforce_count += 1
+
         # Step 3: Generate test prompts (only useful when validation is available)
         if run_validation_fn:
             for mutation in mutations:
-                test_prompts = self._generate_test_prompts(mutation, clusters)
+                test_prompts = self._generate_test_prompts(mutation, failure_clusters)
                 mutation.test_prompts = test_prompts
 
         # Step 4: Apply and validate each mutation
@@ -339,8 +428,6 @@ class SkillEvolver:
                             improvement, self.min_improvement,
                         )
                 else:
-                    # No validation function — apply sanity checks before accepting.
-                    # Verify the skill was actually created/updated on disk.
                     if self._verify_mutation_on_disk(mutation):
                         mutation.accepted = True
                         accepted += 1
@@ -366,10 +453,12 @@ class SkillEvolver:
             mutations_proposed=len(mutations),
             mutations_accepted=accepted,
             mutations_rejected=rejected,
-            failure_clusters=clusters,
+            failure_clusters=failure_clusters,
             mutations=mutations,
             duration_s=time.time() - t0,
             complexity_penalty_applied=total_penalty,
+            success_clusters=success_clusters,
+            reinforce_mutations=reinforce_count,
         )
 
     def run_multi_cycle(
@@ -418,7 +507,7 @@ class SkillEvolver:
             results_for_llm.append({
                 "index": i,
                 "prompt": f.get("prompt", ""),
-                "score": f.get("score", 0),
+                "score": f.get("score", f.get("best_score", 0)),
                 "failed_requirements": f.get("failed", [])[:5],
                 "feedback_snippet": str(f.get("feedback", ""))[:200],
             })
@@ -445,7 +534,7 @@ class SkillEvolver:
                 if i < len(failures)
             ]
             scores = [
-                failures[i].get("score", 0)
+                failures[i].get("score", failures[i].get("best_score", 0))
                 for i in indices
                 if i < len(failures)
             ]
@@ -469,6 +558,128 @@ class SkillEvolver:
         return clusters
 
     # ------------------------------------------------------------------
+    # Private: success clustering
+    # ------------------------------------------------------------------
+
+    def _cluster_successes(self, successes: list[dict]) -> list[SuccessCluster]:
+        """Use the LLM to cluster high-scoring results by strategy pattern."""
+        results_for_llm = []
+        for i, s in enumerate(successes[:30]):
+            results_for_llm.append({
+                "index": i,
+                "prompt": s.get("prompt", ""),
+                "score": s.get("score", s.get("best_score", 0)),
+                "passed_requirements": s.get("passed", [])[:5],
+                "tools_used": s.get("tools_used", []),
+                "rationale_snippet": str(s.get("rationale", ""))[:200],
+            })
+
+        skill_names = ", ".join(self.store.list_skills())
+
+        prompt = _CLUSTER_SUCCESSES_PROMPT.format(
+            results_json=json.dumps(results_for_llm, indent=2),
+            skill_names=skill_names or "(none)",
+        )
+
+        raw_clusters = self._llm_json_call(
+            prompt, max_tokens=2048, expect_array=True
+        )
+        if raw_clusters is None:
+            return []
+
+        clusters: list[SuccessCluster] = []
+        for rc in raw_clusters:
+            indices = rc.get("prompt_indices", [])
+            affected = [
+                successes[i].get("prompt", "")
+                for i in indices
+                if i < len(successes)
+            ]
+            scores = [
+                successes[i].get("score", successes[i].get("best_score", 0))
+                for i in indices
+                if i < len(successes)
+            ]
+            strategies = [
+                str(successes[i].get("rationale", successes[i].get("passed", [])))[:100]
+                for i in indices[:3]
+                if i < len(successes)
+            ]
+
+            if len(affected) < 3:
+                continue
+
+            clusters.append(SuccessCluster(
+                name=rc.get("name", "unknown_pattern"),
+                description=rc.get("description", ""),
+                success_count=len(indices),
+                affected_prompts=affected,
+                mean_score=sum(scores) / len(scores) if scores else 0.0,
+                example_strategies=strategies,
+                key_tools=rc.get("key_tools", []),
+                existing_skill=rc.get("existing_skill"),
+            ))
+
+        clusters.sort(key=lambda c: c.success_count, reverse=True)
+        return clusters
+
+    def _build_split_manifest(self) -> tuple[str, str]:
+        """Return (builtin_manifest, evolved_manifest) for the mutation prompt."""
+        evolved_names = self.skill_manager.evolved_skill_names
+        builtin_lines, evolved_lines = [], []
+        for s in self.skill_manager.get_manifest():
+            line = f"- {s['name']}: {s['description']}"
+            if s["name"] in evolved_names:
+                evolved_lines.append(line)
+            else:
+                builtin_lines.append(line)
+        return (
+            "\n".join(builtin_lines) or "(none)",
+            "\n".join(evolved_lines) or "(none)",
+        )
+
+    def _propose_reinforce_mutation(
+        self, cluster: SuccessCluster
+    ) -> MutationProposal | None:
+        """Ask the LLM to propose a 'reinforce' mutation from a success cluster."""
+        builtin_manifest, evolved_manifest = self._build_split_manifest()
+
+        cluster_json = json.dumps({
+            "name": cluster.name,
+            "description": cluster.description,
+            "type": "success_pattern",
+            "success_count": cluster.success_count,
+            "mean_score": cluster.mean_score,
+            "key_tools": cluster.key_tools,
+            "example_strategies": cluster.example_strategies,
+            "existing_skill": cluster.existing_skill,
+            "affected_prompts": cluster.affected_prompts[:5],
+        }, indent=2)
+
+        prompt = _PROPOSE_MUTATION_PROMPT.format(
+            cluster_json=cluster_json,
+            builtin_skills_manifest=builtin_manifest,
+            evolved_skills_manifest=evolved_manifest,
+        ) + (
+            "\n\nThis cluster represents SUCCESSFUL strategies, not failures. "
+            "Prefer mutation_type 'reinforce' to codify what worked. "
+            "If an existing skill already partially covers this, use 'update' to "
+            "strengthen it with the proven techniques."
+        )
+
+        data = self._llm_json_call(prompt, max_tokens=4000, expect_array=False)
+        if data is None:
+            return None
+
+        return MutationProposal(
+            mutation_type=data.get("mutation_type", "reinforce"),
+            target_skills=data.get("target_skills", []),
+            rationale=data.get("rationale", ""),
+            failure_cluster=cluster.name,
+            proposed_changes=data.get("proposed_changes", {}),
+        )
+
+    # ------------------------------------------------------------------
     # Private: mutation proposal
     # ------------------------------------------------------------------
 
@@ -488,10 +699,7 @@ class SkillEvolver:
 
     def _propose_mutation(self, cluster: FailureCluster) -> MutationProposal | None:
         """Ask the LLM to propose a skill mutation for a failure cluster (with retry)."""
-        manifest = "\n".join(
-            f"- {s['name']}: {s['description']}"
-            for s in self.skill_manager.get_manifest()
-        )
+        builtin_manifest, evolved_manifest = self._build_split_manifest()
 
         cluster_json = json.dumps({
             "name": cluster.name,
@@ -517,7 +725,8 @@ class SkillEvolver:
 
         prompt = _PROPOSE_MUTATION_PROMPT.format(
             cluster_json=cluster_json,
-            skills_manifest=manifest or "(no skills)",
+            builtin_skills_manifest=builtin_manifest,
+            evolved_skills_manifest=evolved_manifest,
         ) + diversity_hint
 
         data = self._llm_json_call(prompt, max_tokens=4000, expect_array=False)
@@ -541,13 +750,23 @@ class SkillEvolver:
         changes = mutation.proposed_changes
         mt = mutation.mutation_type
 
-        if mt == "create":
-            self.store.create_skill(
-                name=changes.get("name", f"auto-{mutation.failure_cluster}"),
-                description=changes.get("description", "Auto-generated skill"),
-                body=changes.get("body", ""),
-                metadata={"origin": "self-evolve", "cluster": mutation.failure_cluster},
-            )
+        if mt in ("create", "reinforce"):
+            skill_name = changes.get("name", f"auto-{mutation.failure_cluster}")
+            skill_exists = (self.evolved_skills_dir / skill_name / "SKILL.md").exists()
+            if skill_exists and mt == "reinforce":
+                self.store.update_skill(
+                    name=skill_name,
+                    description=changes.get("description"),
+                    body=changes.get("body"),
+                )
+            else:
+                origin = "self-evolve-success" if mt == "reinforce" else "self-evolve"
+                self.store.create_skill(
+                    name=skill_name,
+                    description=changes.get("description", "Auto-generated skill"),
+                    body=changes.get("body", ""),
+                    metadata={"origin": origin, "cluster": mutation.failure_cluster},
+                )
 
         elif mt == "update":
             for skill_name in mutation.target_skills:
@@ -577,14 +796,17 @@ class SkillEvolver:
         """Rollback a mutation by restoring from the latest snapshot."""
         mt = mutation.mutation_type
 
-        if mt == "create":
+        if mt in ("create", "reinforce"):
             name = mutation.proposed_changes.get(
                 "name", f"auto-{mutation.failure_cluster}"
             )
             try:
-                self.store.delete_skill(name)
+                self.store.rollback_skill(name)
             except FileNotFoundError:
-                pass
+                try:
+                    self.store.delete_skill(name)
+                except FileNotFoundError:
+                    pass
 
         elif mt == "update":
             for skill_name in mutation.target_skills:
@@ -723,7 +945,7 @@ class SkillEvolver:
         mt = mutation.mutation_type
         changes = mutation.proposed_changes
 
-        if mt == "create":
+        if mt in ("create", "reinforce"):
             name = changes.get("name", f"auto-{mutation.failure_cluster}")
             skill_md = self.evolved_skills_dir / name / "SKILL.md"
             if not skill_md.exists():
@@ -759,5 +981,5 @@ class SkillEvolver:
 
     @staticmethod
     def _mean_score(results: list[dict]) -> float:
-        scores = [r.get("score", 0.0) for r in results]
+        scores = [r.get("score", r.get("best_score", 0.0)) for r in results]
         return sum(scores) / len(scores) if scores else 0.0

@@ -44,7 +44,7 @@ def vlm_result() -> VerifierResult:
         passed=["good composition"],
         failed=["blurry background"],
         overall_assessment="Decent image with some blur issues.",
-        evolution_suggestions=["add depth ControlNet"],
+        evolution_suggestions=["add detail LoRA"],
     )
 
 
@@ -182,7 +182,7 @@ class TestHybridVerifier:
         assert result.score == 0.5
         assert "[Human override]" in result.overall_assessment
         assert any("[HUMAN]" in s for s in result.evolution_suggestions)
-        assert "add depth ControlNet" in result.evolution_suggestions
+        assert "add detail LoRA" in result.evolution_suggestions
 
     def test_timeout_returns_vlm_result(self, mock_sync, png_bytes, vlm_result, tmp_path):
         mock_vlm = MagicMock()

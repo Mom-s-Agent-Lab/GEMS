@@ -192,6 +192,7 @@ class SkillManager:
 
         self._cache: dict[str, tuple[SkillProperties, str]] = {}
         self._props: dict[str, SkillProperties] = {}
+        self._evolved_names: set[str] = set()
         self._load_all()
 
     # ------------------------------------------------------------------
@@ -204,11 +205,11 @@ class SkillManager:
         Evolved skills are loaded second; if an evolved skill has the same
         name as a pre-defined one, the evolved version takes precedence.
         """
-        dirs: list[Path] = [self._root]
+        dirs: list[tuple[Path, bool]] = [(self._root, False)]
         if self._evolved_root and self._evolved_root.is_dir():
-            dirs.append(self._evolved_root)
+            dirs.append((self._evolved_root, True))
 
-        for root in dirs:
+        for root, is_evolved in dirs:
             if not root.is_dir():
                 continue
             for skill_dir in sorted(root.iterdir()):
@@ -216,8 +217,12 @@ class SkillManager:
                     continue
                 try:
                     props, body = _parse_skill_md(skill_dir)
+                    if is_evolved and not props.tags:
+                        props = props._replace(tags=["agent"])
                     self._cache[props.name] = (props, body)
                     self._props[props.name] = props
+                    if is_evolved:
+                        self._evolved_names.add(props.name)
                 except ValueError as exc:
                     import warnings
 
@@ -233,6 +238,11 @@ class SkillManager:
     def skill_names(self) -> list[str]:
         """Sorted list of loaded skill names."""
         return sorted(self._props)
+
+    @property
+    def evolved_skill_names(self) -> set[str]:
+        """Names of skills loaded from the evolved skills directory."""
+        return set(self._evolved_names)
 
     def get_properties(self, name: str) -> SkillProperties:
         """Return :class:`SkillProperties` for *name* (raises ``KeyError`` if missing)."""
@@ -303,21 +313,31 @@ class SkillManager:
 
     def detect_relevant_skills(self, prompt: str) -> list[str]:
         """
-        Return skill names whose description keywords appear in *prompt*.
+        Return skill names likely relevant to *prompt*.
 
-        This is a lightweight heuristic for pre-seeding suggestions when the
-        agent has not yet decided which skills to activate.  Returns names in
-        alphabetical order.
+        For built-in skills, matches by keyword overlap between description
+        and prompt.  For evolved skills, additionally matches against the
+        skill name (kebab-case words) and metadata cluster name, since
+        evolved skill descriptions tend to use abstract technique language
+        that rarely overlaps with concrete prompt words.
         """
         prompt_lower = prompt.lower()
-        matched: list[str] = []
+        prompt_words = set(re.findall(r"[a-z]{4,}", prompt_lower))
+        matched: set[str] = set()
+
         for name, props in self._props.items():
-            # Extract significant words (≥4 chars) from the description
-            keywords = set(re.findall(r"[a-z]{4,}", props.description.lower()))
-            # Check for overlap with the prompt
-            prompt_words = set(re.findall(r"[a-z]{4,}", prompt_lower))
-            if keywords & prompt_words:
-                matched.append(name)
+            desc_keywords = set(re.findall(r"[a-z]{4,}", props.description.lower()))
+            if desc_keywords & prompt_words:
+                matched.add(name)
+                continue
+
+            if name in self._evolved_names:
+                name_words = set(name.replace("-", " ").split())
+                cluster = (props.metadata or {}).get("cluster", "")
+                cluster_words = set(re.findall(r"[a-z]{4,}", cluster.lower()))
+                if (name_words & prompt_words) or (cluster_words & prompt_words):
+                    matched.add(name)
+
         return sorted(matched)
 
     def get_manifest(self) -> list[dict[str, str]]:

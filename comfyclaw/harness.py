@@ -11,8 +11,8 @@ Topology accumulation
 ---------------------
 When ``evolve_from_best=True`` (the default) each iteration starts from the
 **best workflow snapshot** produced so far rather than resetting to the
-original base workflow.  This means LoRA / ControlNet nodes added in round 1
-persist into round 2, and the agent only needs to add *incremental* upgrades.
+original base workflow.  This means LoRA nodes added in round 1 persist
+into round 2, and the agent only needs to add *incremental* upgrades.
 Set ``evolve_from_best=False`` to revert to the old reset-each-iteration
 behaviour.
 """
@@ -1028,6 +1028,11 @@ class ClawHarness:
     def sft_traces(self) -> list[dict]:
         """Full agent conversation traces for SFT data collection."""
         return self._sft_traces
+
+    @property
+    def skills_read(self) -> list[str]:
+        """Skills read by the agent during the current/last run."""
+        return self._agent.skills_read
 
     # ------------------------------------------------------------------
     # Factory methods

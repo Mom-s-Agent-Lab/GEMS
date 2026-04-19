@@ -33,7 +33,7 @@ STAGE_DEFINITIONS: dict[str, dict[str, Any]] = {
         "description": "Prompt encoding and conditioning control",
         "output_types": {"CONDITIONING"},
         "input_types": {"CLIP"},
-        "agent_tools": ["set_prompt", "add_regional_attention", "add_controlnet"],
+        "agent_tools": ["set_prompt", "add_regional_attention"],
     },
     "sampling": {
         "description": "Diffusion sampling (denoising latents)",
@@ -56,11 +56,6 @@ STAGE_DEFINITIONS: dict[str, dict[str, Any]] = {
         "description": "Image-space transforms, saving, and preview",
         "pure_types": {"IMAGE"},
         "agent_tools": ["add_node", "set_param", "add_inpaint_pass"],
-    },
-    "control_preprocess": {
-        "description": "ControlNet hint preprocessors (canny, depth, pose)",
-        "category_keywords": ["preprocessor", "controlnet", "pose", "depth", "canny", "edge"],
-        "agent_tools": ["add_controlnet", "add_node"],
     },
 }
 

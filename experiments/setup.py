@@ -71,6 +71,24 @@ MODEL_FILES: dict[str, list[tuple[str, str, str]]] = {
     ],
 }
 
+# ── LoRA download definitions ─────────────────────────────────────────────
+# Each entry: ("hf"|"civitai", repo_or_version_id, filename, local_subdir)
+
+LORA_FILES: dict[str, list[tuple[str, str, str, str]]] = {
+    "qwen": [
+        ("civitai", "2327746",
+         "real_life_qwen.safetensors", "loras"),
+        ("civitai", "2359367",
+         "Qwen_art_lora.safetensors", "loras"),
+    ],
+    "z-image-turbo": [
+        ("civitai", "2617751",
+         "RealisticSnapshot-Zimage-Turbov5.safetensors", "loras"),
+        ("civitai", "2521349",
+         "Enhancer.safetensors", "loras"),
+    ],
+}
+
 # ── Benchmark download definitions ────────────────────────────────────────
 # method: "git" for git clone, "hf_dataset" for huggingface datasets download
 
@@ -107,6 +125,20 @@ BENCHMARK_SOURCES: dict[str, dict] = {
 
 def _file_basename(hf_path: str) -> str:
     return hf_path.rsplit("/", 1)[-1]
+
+
+def _download_civitai(version_id: str, dest_path: Path) -> None:
+    """Download a model file from Civitai by model-version ID."""
+    import urllib.request
+
+    url = f"https://civitai.com/api/download/models/{version_id}?type=Model&format=SafeTensor"
+    token = os.environ.get("CIVITAI_API_TOKEN", "")
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+
+    with urllib.request.urlopen(req) as resp, open(dest_path, "wb") as f:
+        shutil.copyfileobj(resp, f)
 
 
 def download_model_files(
@@ -146,6 +178,50 @@ def download_model_files(
                     local_dir=tmp_dir,
                 )
                 shutil.move(str(downloaded), str(dest_path))
+
+            size_mb = dest_path.stat().st_size / (1024 * 1024)
+            log.info("  OK %s (%.0f MB)", dest_path, size_mb)
+        except Exception as exc:
+            if dest_path.exists():
+                dest_path.unlink()
+            log.error("  FAILED %s: %s", filename, exc)
+            raise
+
+    loras = LORA_FILES.get(model, [])
+    if loras:
+        log.info("  LoRAs for %s: %d file(s)", model, len(loras))
+
+    for source_type, source_id, filename, subdir in loras:
+        dest_dir = comfyui_dir / "models" / subdir
+        dest_path = dest_dir / filename
+
+        if dest_path.exists():
+            size_mb = dest_path.stat().st_size / (1024 * 1024)
+            log.info("  SKIP %s (already exists, %.0f MB)", dest_path, size_mb)
+            continue
+
+        if dry_run:
+            log.info("  WOULD DOWNLOAD %s (%s:%s) → %s", filename, source_type, source_id, dest_path)
+            continue
+
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if source_type == "civitai":
+                log.info("  Downloading %s from Civitai (version %s) ...", filename, source_id)
+                _download_civitai(source_id, dest_path)
+            elif source_type == "hf":
+                import tempfile as _tmp
+
+                from huggingface_hub import hf_hub_download as _hf_dl
+
+                log.info("  Downloading %s from HuggingFace (%s) ...", filename, source_id)
+                with _tmp.TemporaryDirectory() as tmp_dir:
+                    downloaded = _hf_dl(repo_id=source_id, filename=filename, local_dir=tmp_dir)
+                    shutil.move(str(downloaded), str(dest_path))
+            else:
+                log.warning("  Unknown source type %r for %s — skipping", source_type, filename)
+                continue
 
             size_mb = dest_path.stat().st_size / (1024 * 1024)
             log.info("  OK %s (%.0f MB)", dest_path, size_mb)

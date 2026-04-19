@@ -65,16 +65,14 @@ Planning ──► Construction ──► Conditioning ──► Enhancement ─
 ### Stage 3 — Conditioning
 
 **Available tools**: `set_prompt`, `add_regional_attention`,
-`add_controlnet`, `set_param`, `inspect_workflow`, `read_skill`,
-`transition_stage`
+`set_param`, `inspect_workflow`, `read_skill`, `transition_stage`
 
 **Actions**:
 1. Call `set_prompt` with a detailed, professional positive prompt:
    `[subject & scene], [style], [lighting], [camera/lens], [quality boosters]`
 2. Set a strong negative prompt
 3. Add regional attention if the scene has distinct foreground/background
-4. Add ControlNet if structural guidance is needed
-5. Call `transition_stage("enhancement")` when conditioning is complete
+4. Call `transition_stage("enhancement")` when conditioning is complete
 
 ### Stage 4 — Enhancement
 

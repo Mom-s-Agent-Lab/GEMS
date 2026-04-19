@@ -5,7 +5,7 @@ description: >-
   Detect when UNETLoader contains "longcat_image" in the model name, or CLIPLoader
   type is "longcat_image". Uses standard ComfyUI nodes (UNETLoader, CLIPLoader
   type "longcat_image", VAELoader, KSampler) with FluxGuidance and CFGNorm.
-  Key strength: superior Chinese text rendering. LoRA and ControlNet are not supported.
+  Key strength: superior Chinese text rendering. LoRA is not supported.
 license: Apache-2.0
 metadata:
   author: davidliuk
@@ -40,11 +40,10 @@ It requires ~17 GB VRAM (BF16) or CPU offload.
 | Sampler | `euler_ancestral` | `euler` | `res_multistep` | **`euler`** |
 | Resolution | 512/1024 | 1328×1328 | 1024×1024 | **1024×1024** |
 | LoRA | yes | yes | yes | **not supported** |
-| ControlNet | yes | yes | yes | **not supported** |
 
-> **Note on LoRA / ControlNet tools:** Calling `add_lora_loader` or `add_controlnet`
-> while LongCat-Image is the active model returns an informative error and does NOT
-> modify the workflow. Use `set_param` and prompt engineering instead — see §6/§7.
+> **Note on LoRA tools:** Calling `add_lora_loader` while LongCat-Image is the
+> active model returns an informative error and does NOT modify the workflow.
+> Use `set_param` and prompt engineering instead — see §6/§7.
 
 ---
 
@@ -148,9 +147,9 @@ cartoon, illustration, anime, watermark, text, logo
 
 ---
 
-## 5. Iteration strategy (no LoRA / ControlNet available)
+## 5. Iteration strategy (no LoRA available)
 
-Since LoRA and ControlNet are not supported, quality improvements come from:
+Since LoRA is not supported, quality improvements come from:
 
 | Verifier issue | Fix strategy |
 |---|---|

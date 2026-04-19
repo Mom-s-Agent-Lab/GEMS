@@ -132,8 +132,6 @@ Score rubric (integer 1–10):
   9–10: Excellent — faithful to prompt, high quality, minimal or no issues
 
 Fix strategy vocabulary (use these exact strings):
-  add_controlnet_canny | add_controlnet_depth | add_controlnet_normal
-  add_controlnet_pose  | add_controlnet_tile  | add_controlnet_seg
   inject_lora_detail   | inject_lora_style    | inject_lora_anatomy  | inject_lora_lighting
   add_regional_prompt  | add_hires_fix        | add_inpaint_pass     | add_ip_adapter
   refine_positive_prompt | refine_negative_prompt | increase_steps | adjust_cfg | adjust_sampler

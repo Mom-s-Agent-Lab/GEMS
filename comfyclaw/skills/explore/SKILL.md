@@ -49,13 +49,12 @@ Analyze each node's type signature and assign it to one or more pipeline stages:
 
 | Stage | Key I/O types | Example nodes |
 |-------|--------------|---------------|
-| **Loading** | Outputs MODEL, CLIP, VAE, CONTROL_NET | CheckpointLoaderSimple, UNETLoader, VAELoader, CLIPLoader, LoraLoader, ControlNetLoader |
+| **Loading** | Outputs MODEL, CLIP, VAE | CheckpointLoaderSimple, UNETLoader, VAELoader, CLIPLoader, LoraLoader |
 | **Conditioning** | Consumes CLIP, outputs CONDITIONING | CLIPTextEncode, ConditioningCombine, ConditioningAverage, FluxGuidance |
 | **Sampling** | Consumes MODEL + CONDITIONING + LATENT, outputs LATENT | KSampler, KSamplerAdvanced, SamplerCustom |
 | **Latent ops** | Consumes/outputs LATENT | EmptyLatentImage, LatentUpscaleBy, LatentComposite, LatentBlend |
 | **Decoding** | Consumes LATENT + VAE, outputs IMAGE | VAEDecode, VAEEncode |
 | **Image post-processing** | Consumes/outputs IMAGE | ImageScale, ImageSharpen, ImageBlend, SaveImage, PreviewImage |
-| **Control** | Consumes IMAGE, outputs CONTROL_NET hints | CannyEdgePreprocessor, DepthAnythingPreprocessor, OpenPosePreprocessor |
 
 Classification rules:
 1. If a node outputs MODEL, CLIP, or VAE as its primary output -> **Loading**
@@ -64,7 +63,6 @@ Classification rules:
 4. If a node only handles LATENT <-> LATENT transforms -> **Latent ops**
 5. If a node consumes LATENT + VAE and outputs IMAGE -> **Decoding**
 6. If a node primarily handles IMAGE -> **Image post-processing**
-7. If a node produces preprocessed hints for ControlNet -> **Control**
 
 ### Step 3 — Map agent tools to stages
 
@@ -74,7 +72,7 @@ Based on the node classification, map ComfyClaw's 16 tools to pipeline stages:
 |-------|-------------|
 | **Planning** | `inspect_workflow`, `report_evolution_strategy`, `read_skill`, `query_available_models` |
 | **Construction** | `add_node`, `connect_nodes`, `delete_node`, `set_param` |
-| **Conditioning** | `set_prompt`, `add_regional_attention`, `add_controlnet` |
+| **Conditioning** | `set_prompt`, `add_regional_attention` |
 | **Enhancement** | `add_lora_loader`, `add_hires_fix`, `add_inpaint_pass` |
 | **Finalization** | `validate_workflow`, `finalize_workflow` |
 
@@ -96,7 +94,7 @@ Write the results to a `stage_map.json` with this structure:
     "conditioning": {
       "description": "Prompt encoding and conditioning control",
       "node_classes": ["CLIPTextEncode", "ConditioningCombine", "..."],
-      "agent_tools": ["set_prompt", "add_regional_attention", "add_controlnet"]
+      "agent_tools": ["set_prompt", "add_regional_attention"]
     }
   },
   "unclassified_nodes": ["CustomNode1", "..."]

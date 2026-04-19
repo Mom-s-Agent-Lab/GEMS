@@ -39,7 +39,6 @@ STAGE_TOOLS: dict[str, set[str]] = {
     "conditioning": {
         "set_prompt",
         "add_regional_attention",
-        "add_controlnet",
         "set_param",
         "inspect_workflow",
         "read_skill",

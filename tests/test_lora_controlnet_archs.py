@@ -1,12 +1,11 @@
-"""Tests for LoRA/ControlNet arch-specific wiring.
+"""Tests for LoRA arch-specific wiring.
 
-Covers the ARCH_REGISTRY-driven routing in ClawAgent._add_lora and
-ClawAgent._add_controlnet for:
+Covers the ARCH_REGISTRY-driven routing in ClawAgent._add_lora for:
 
-- Standard SD/SDXL/Flux:   LoraLoader + ControlNetApplyAdvanced
-- Qwen-Image-2512:         LoraLoaderModelOnly + QwenImageFunControlNet(Loader|Apply)
-- Z-Image-Turbo:           LoraLoaderModelOnly + ZImageFunControlNet(Loader|Apply)
-- LongCat-Image:           LoRA/CN gracefully blocked with informative error
+- Standard SD/SDXL/Flux:   LoraLoader (MODEL + CLIP)
+- Qwen-Image-2512:         LoraLoaderModelOnly
+- Z-Image-Turbo:           LoraLoaderModelOnly
+- LongCat-Image:           LoRA gracefully blocked with informative error
 """
 
 from __future__ import annotations
@@ -201,30 +200,21 @@ class TestArchRegistry:
     def test_registry_contains_three_archs(self) -> None:
         assert set(ARCH_REGISTRY) == {"qwen_image", "z_image", "longcat_image"}
 
-    def test_qwen_uses_model_only_lora_and_patch_cn(self) -> None:
+    def test_qwen_uses_model_only_lora(self) -> None:
         cfg = ARCH_REGISTRY["qwen_image"]
         assert cfg.lora_node == "LoraLoaderModelOnly"
         assert cfg.lora_needs_clip is False
-        assert cfg.cn_style == "model_patch"
-        assert cfg.cn_loader_node == "ModelPatchLoader"
-        assert cfg.cn_apply_node == "QwenImageDiffsynthControlnet"
-        assert cfg.cn_has_union_type is False
-        assert cfg.lora_supported and cfg.cn_supported
+        assert cfg.lora_supported is True
 
-    def test_zimage_uses_model_only_lora_and_patch_cn(self) -> None:
+    def test_zimage_uses_model_only_lora(self) -> None:
         cfg = ARCH_REGISTRY["z_image"]
         assert cfg.lora_node == "LoraLoaderModelOnly"
         assert cfg.lora_needs_clip is False
-        assert cfg.cn_style == "model_patch"
-        assert cfg.cn_loader_node == "ModelPatchLoader"
-        assert cfg.cn_apply_node == "ZImageFunControlnet"
-        assert cfg.cn_has_union_type is False
-        assert cfg.lora_supported and cfg.cn_supported
+        assert cfg.lora_supported is True
 
-    def test_longcat_blocks_lora_and_cn(self) -> None:
+    def test_longcat_blocks_lora(self) -> None:
         cfg = ARCH_REGISTRY["longcat_image"]
         assert cfg.lora_supported is False
-        assert cfg.cn_supported is False
 
 
 # ---------------------------------------------------------------------------
@@ -335,150 +325,6 @@ class TestAddLoraLongCat:
 
 
 # ---------------------------------------------------------------------------
-# ControlNet — per-arch wiring
-# ---------------------------------------------------------------------------
-
-
-class TestAddControlNetQwen:
-    def test_uses_model_patch_nodes(self, qwen_wm: WorkflowManager) -> None:
-        agent = _make_agent()
-        # The Qwen fixture needs a VAELoader for the model-patch CN; add it.
-        vae_nid = qwen_wm.add_node("VAELoader", vae_name="qwen_image_vae.safetensors")
-        img_nid = qwen_wm.add_node("LoadImage", image="ref.png")
-        result, _ = agent._dispatch(
-            "add_controlnet",
-            {
-                "controlnet_name": "qwen_image_diffsynth_canny.safetensors",
-                "positive_node_id": "3",
-                "negative_node_id": "4",
-                "image_node_id": img_nid,
-                "strength": 0.75,
-            },
-            qwen_wm,
-        )
-        loader_nids = qwen_wm.get_nodes_by_class("ModelPatchLoader")
-        patch_nids = qwen_wm.get_nodes_by_class("QwenImageDiffsynthControlnet")
-        assert len(loader_nids) == 1
-        assert len(patch_nids) == 1
-        # Patch node has correct wiring.
-        p_in = qwen_wm.workflow[patch_nids[0]]["inputs"]
-        assert p_in["model"] == ["1", 0]  # was UNETLoader
-        assert p_in["model_patch"] == [loader_nids[0], 0]
-        assert p_in["vae"] == [vae_nid, 0]
-        assert p_in["image"] == [img_nid, 0]
-        assert p_in["strength"] == 0.75
-        assert "union_type" not in p_in
-        # KSampler.model should now come from the patch node.
-        assert qwen_wm.workflow["5"]["inputs"]["model"] == [patch_nids[0], 0]
-        # Conditioning untouched.
-        assert qwen_wm.workflow["5"]["inputs"]["positive"] == ["3", 0]
-        assert qwen_wm.workflow["5"]["inputs"]["negative"] == ["4", 0]
-        # No legacy nodes should have been emitted.
-        assert qwen_wm.get_nodes_by_class("QwenImageFunControlNetLoader") == []
-        assert qwen_wm.get_nodes_by_class("QwenImageFunControlNetApply") == []
-        assert qwen_wm.get_nodes_by_class("ControlNetLoader") == []
-        assert qwen_wm.get_nodes_by_class("ControlNetApplyAdvanced") == []
-        assert "qwen-image-2512" in result.lower()
-
-    def test_requires_image_node_id(self, qwen_wm: WorkflowManager) -> None:
-        """model-patch CN requires a reference image; without it, error out."""
-        agent = _make_agent()
-        qwen_wm.add_node("VAELoader", vae_name="qwen_image_vae.safetensors")
-        result, _ = agent._dispatch(
-            "add_controlnet",
-            {
-                "controlnet_name": "x.safetensors",
-                "positive_node_id": "3",
-                "negative_node_id": "4",
-                "strength": 0.7,
-            },
-            qwen_wm,
-        )
-        assert "⚠️" in result
-        assert "image_node_id" in result
-        assert qwen_wm.get_nodes_by_class("ModelPatchLoader") == []
-
-    def test_requires_vae_loader(self, qwen_wm: WorkflowManager) -> None:
-        """model-patch CN requires a VAE source."""
-        agent = _make_agent()
-        img_nid = qwen_wm.add_node("LoadImage", image="ref.png")
-        result, _ = agent._dispatch(
-            "add_controlnet",
-            {
-                "controlnet_name": "x.safetensors",
-                "positive_node_id": "3",
-                "negative_node_id": "4",
-                "image_node_id": img_nid,
-                "strength": 0.7,
-            },
-            qwen_wm,
-        )
-        assert "⚠️" in result
-        assert "VAELoader" in result
-        assert qwen_wm.get_nodes_by_class("ModelPatchLoader") == []
-
-
-class TestAddControlNetZImage:
-    def test_uses_model_patch_nodes(self, zimage_wm: WorkflowManager) -> None:
-        agent = _make_agent()
-        vae_nid = zimage_wm.add_node("VAELoader", vae_name="ae.safetensors")
-        img_nid = zimage_wm.add_node("LoadImage", image="ref.png")
-        result, _ = agent._dispatch(
-            "add_controlnet",
-            {
-                "controlnet_name": "z_image_fun_canny.safetensors",
-                "positive_node_id": "3",
-                "negative_node_id": "4",
-                "image_node_id": img_nid,
-                "strength": 0.80,
-            },
-            zimage_wm,
-        )
-        loader_nids = zimage_wm.get_nodes_by_class("ModelPatchLoader")
-        patch_nids = zimage_wm.get_nodes_by_class("ZImageFunControlnet")
-        assert len(loader_nids) == 1
-        assert len(patch_nids) == 1
-        p_in = zimage_wm.workflow[patch_nids[0]]["inputs"]
-        assert p_in["model"] == ["1", 0]
-        assert p_in["model_patch"] == [loader_nids[0], 0]
-        assert p_in["vae"] == [vae_nid, 0]
-        assert p_in["image"] == [img_nid, 0]
-        assert p_in["strength"] == 0.80
-        assert "union_type" not in p_in
-        # KSampler.model now routes through the patch node.
-        assert zimage_wm.workflow["5"]["inputs"]["model"] == [patch_nids[0], 0]
-        # Conditioning untouched.
-        assert zimage_wm.workflow["5"]["inputs"]["positive"] == ["3", 0]
-        assert zimage_wm.workflow["5"]["inputs"]["negative"] == ["4", 0]
-        # No legacy Fun CN loader/apply nodes.
-        assert zimage_wm.get_nodes_by_class("ZImageFunControlNetLoader") == []
-        assert zimage_wm.get_nodes_by_class("ZImageFunControlNetApply") == []
-        assert "z-image-turbo" in result.lower()
-
-
-class TestAddControlNetLongCat:
-    def test_returns_blocked_error(self, longcat_wm: WorkflowManager) -> None:
-        agent = _make_agent()
-        result, stop = agent._dispatch(
-            "add_controlnet",
-            {
-                "controlnet_name": "whatever.safetensors",
-                "positive_node_id": "3",
-                "negative_node_id": "4",
-                "strength": 0.7,
-            },
-            longcat_wm,
-        )
-        assert stop is False
-        assert "longcat-image" in result.lower()
-        assert "not supported" in result.lower()
-        assert longcat_wm.get_nodes_by_class("ControlNetLoader") == []
-        assert longcat_wm.get_nodes_by_class("ModelPatchLoader") == []
-        assert longcat_wm.get_nodes_by_class("QwenImageDiffsynthControlnet") == []
-        assert longcat_wm.get_nodes_by_class("ZImageFunControlnet") == []
-
-
-# ---------------------------------------------------------------------------
 # Standard SD workflow still uses the legacy code paths
 # ---------------------------------------------------------------------------
 
@@ -501,30 +347,3 @@ class TestStandardArchStillWorks:
         assert wm.get_nodes_by_class("LoraLoaderModelOnly") == []
         assert len(wm.get_nodes_by_class("LoraLoader")) == 1
 
-    def test_controlnet_uses_standard_apply_advanced(self, wm: WorkflowManager) -> None:
-        agent = _make_agent()
-        # SD workflow needs a negative prompt for CN wiring; extend the minimal fixture.
-        neg_nid = wm.add_node(
-            "CLIPTextEncode", "Negative", clip=["1", 1], text="blurry"
-        )
-        wm.workflow["3"]["inputs"]["negative"] = [neg_nid, 0]
-        img_nid = wm.add_node("LoadImage", image="ref.png")
-        result, _ = agent._dispatch(
-            "add_controlnet",
-            {
-                "controlnet_name": "control_v11p_sd15_canny.pth",
-                "positive_node_id": "2",
-                "negative_node_id": neg_nid,
-                "image_node_id": img_nid,
-                "preprocessor_class": "CannyEdgePreprocessor",
-                "strength": 0.7,
-                "start_percent": 0.0,
-                "end_percent": 1.0,
-            },
-            wm,
-        )
-        assert len(wm.get_nodes_by_class("ControlNetLoader")) == 1
-        assert len(wm.get_nodes_by_class("ControlNetApplyAdvanced")) == 1
-        assert wm.get_nodes_by_class("ModelPatchLoader") == []
-        assert wm.get_nodes_by_class("QwenImageDiffsynthControlnet") == []
-        assert wm.get_nodes_by_class("ZImageFunControlnet") == []

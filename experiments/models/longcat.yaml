@@ -1,5 +1,5 @@
 # LongCat Image (6B, BF16) — Meituan's Flux-based text-to-image model
-# Architecture: UNET + CFGNorm + FluxGuidance (no LoRA/ControlNet support)
+# Architecture: UNET + CFGNorm + FluxGuidance (no LoRA support)
 
 name: "LongCat Image (BF16)"
 short_name: longcat

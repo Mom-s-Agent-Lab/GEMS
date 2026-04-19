@@ -219,6 +219,7 @@ class SkillStore:
         description: str,
         body: str,
         metadata: dict[str, str] | None = None,
+        tags: list[str] | None = None,
     ) -> str:
         """Generate SKILL.md content with YAML frontmatter."""
         lines = ["---", f"name: {name}"]
@@ -234,6 +235,8 @@ class SkillStore:
             lines.append("metadata:")
             for k, v in sorted(metadata.items()):
                 lines.append(f"  {k}: \"{v}\"")
+        effective_tags = tags if tags is not None else ["agent"]
+        lines.append(f"tags: [{', '.join(effective_tags)}]")
         lines.append("---")
         lines.append("")
         lines.append(body)

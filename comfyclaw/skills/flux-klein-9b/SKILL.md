@@ -5,8 +5,7 @@ description: >-
   text-to-image model (Apr 2026). Uses an ADVANCED sampling pipeline:
   SamplerCustomAdvanced + CFGGuider + Flux2Scheduler — NOT standard KSampler.
   Detect when UNETLoader contains "flux-2-klein" or "flux2-klein" in the model
-  name, or CLIPLoader type is "flux2". LoRA and ControlNet are not supported
-  for this model.
+  name, or CLIPLoader type is "flux2". LoRA is not supported for this model.
 license: Apache-2.0
 metadata:
   author: davidliuk
@@ -42,7 +41,6 @@ FLUX.2 Klein uses `SamplerCustomAdvanced` with `CFGGuider` and `Flux2Scheduler`.
 | CFG | varies | **1** (fixed, do not change) |
 | Text encoder type | varies | **`flux2`** |
 | LoRA | yes | **NOT supported** |
-| ControlNet | yes | **NOT supported** |
 
 ---
 
@@ -114,7 +112,6 @@ set_param("<RandomNoise ID>", "noise_seed", 12345)
 - **Do NOT change KSamplerSelect sampler_name** — must stay at "euler"
 - **Do NOT add KSampler** — this model uses SamplerCustomAdvanced exclusively
 - **Do NOT add LoRA** — not supported for FLUX.2 Klein architecture
-- **Do NOT add ControlNet** — not supported for FLUX.2 Klein architecture
 - **Do NOT add ModelSamplingAuraFlow** — not needed for this model
 - **Do NOT replace ConditioningZeroOut with CLIPTextEncode for negative** — model requires zeroed negative conditioning
 - **Do NOT disconnect or rewire the SamplerCustomAdvanced inputs** — all 5 inputs (noise, guider, sampler, sigmas, latent_image) must be connected
@@ -159,7 +156,7 @@ Poor:
 
 ## 6. Iteration strategy
 
-Since LoRA and ControlNet are NOT available, improvements come entirely from
+Since LoRA is NOT available, improvements come entirely from
 prompt engineering and resolution changes.
 
 | Verifier issue | Fix strategy |

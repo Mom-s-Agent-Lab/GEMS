@@ -233,7 +233,7 @@ class TestRegionIssues:
                     "issue_type": "lighting",
                     "description": "Too flat",
                     "severity": "high",
-                    "fix_strategies": ["add_controlnet_depth"],
+                    "fix_strategies": ["inject_lora_detail"],
                 },
                 {
                     "region": "face",
@@ -243,7 +243,7 @@ class TestRegionIssues:
                     "fix_strategies": ["inject_lora_detail"],
                 },
             ],
-            "evolution_suggestions": ["Add depth ControlNet"],
+            "evolution_suggestions": ["Add detail LoRA"],
         }
         side_effects = [
             _litellm_text_response('["Q?"]'),
@@ -256,8 +256,8 @@ class TestRegionIssues:
         assert len(result.region_issues) == 2
         assert result.region_issues[0].region == "background"
         assert result.region_issues[0].severity == "high"
-        assert "add_controlnet_depth" in result.region_issues[0].fix_strategies
-        assert result.evolution_suggestions == ["Add depth ControlNet"]
+        assert "inject_lora_detail" in result.region_issues[0].fix_strategies
+        assert result.evolution_suggestions == ["Add detail LoRA"]
 
 
 # ---------------------------------------------------------------------------

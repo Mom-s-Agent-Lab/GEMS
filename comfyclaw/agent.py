@@ -12,7 +12,6 @@ Inspection  : inspect_workflow, query_available_models
 Prompt      : set_prompt  (auto-resolves sampler→encoder links; no node ID needed)
 Basic edit  : set_param, add_node, connect_nodes, delete_node
 LoRA        : add_lora_loader
-ControlNet  : add_controlnet
 Regional    : add_regional_attention
 Refinement  : add_hires_fix, add_inpaint_pass
 Control     : report_evolution_strategy, finalize_workflow
@@ -95,8 +94,8 @@ Iteration strategy
       Do this EVERY iteration, even if you also plan structural changes.
    b. If a relevant skill is listed in <available_skills>, call read_skill to load
       its full instructions BEFORE applying that upgrade.
-   c. Call query_available_models BEFORE adding any LoRA or ControlNet node.
-   d. Apply structural upgrades (LoRA / ControlNet / regional / hires / inpaint).
+   c. Call query_available_models BEFORE adding any LoRA node.
+   d. Apply structural upgrades (LoRA / regional / hires / inpaint).
    e. Tune sampler parameters (steps, CFG, seed) as needed.
    f. Call validate_workflow to catch wiring errors.
    g. Call finalize_workflow when done (it auto-validates).
@@ -135,30 +134,29 @@ you can see each skill's name and description in <available_skills>.  When you d
 to apply a skill, call read_skill("<skill-name>") to load the full instructions.  Only
 load skills you actually intend to use — each read consumes context.
 
+Skill priority: some skills are "built-in" (curated, authoritative) and some are
+"evolved" (auto-generated from benchmark patterns).  Evolved skills complement
+built-in ones — they add specialized techniques, not replace them.  If an evolved
+skill mentions a built-in skill (e.g. "Complements: regional-control"), read and
+apply the built-in skill FIRST, then layer the evolved skill's extra techniques.
+
 Decision heuristics
 -------------------
   Workflow is EMPTY (no nodes)          → read_skill("workflow-builder") FIRST.
                                          Then query_available_models to pick arch.
   Workflow contains QwenImageModelLoader → read_skill("qwen-image-2512") FIRST.
-                                         Qwen: LoRA = LoraLoaderModelOnly;
-                                         ControlNet = ModelPatchLoader +
-                                         QwenImageDiffsynthControlnet (model-patch,
-                                         requires a reference image).
+                                         Qwen: LoRA = LoraLoaderModelOnly.
   Active model contains "longcat"      → read_skill("longcat-image") FIRST.
                                          LongCat uses CFGNorm + FluxGuidance, not
-                                         ModelSamplingAuraFlow. LoRA/ControlNet
-                                         NOT supported via standard tools.
+                                         ModelSamplingAuraFlow. LoRA NOT supported
+                                         via standard tools.
   Active model contains "z_image"      → read_skill("z-image-turbo") FIRST.
                                          Z-Image uses cfg=1, sampler=res_multistep,
                                          ConditioningZeroOut for negative. NEVER change cfg/sampler.
-                                         LoRA: LoraLoaderModelOnly;
-                                         CN: ModelPatchLoader + ZImageFunControlnet.
+                                         LoRA: LoraLoaderModelOnly.
   Active model name contains "lcm"     → read_skill("dreamshaper8-lcm") FIRST, before
                                          any sampler tuning — LCM needs different
                                          steps/cfg/sampler than standard SD models.
-  Flat / low-depth background          → read_skill("controlnet-control"), add depth
-  Blurry edges / lost structure        → read_skill("controlnet-control"), add canny
-  Wrong human pose / body              → read_skill("controlnet-control"), add pose
   Plasticky skin / poor texture        → read_skill("lora-enhancement"), detail LoRA
   Wrong anatomy (hands, fingers)       → read_skill("lora-enhancement"), anatomy LoRA
   Style inconsistency                  → read_skill("lora-enhancement"), style LoRA
@@ -176,14 +174,14 @@ Structural upgrade priority (iteration 2+)
 ------------------------------------------
 When the workflow already has nodes AND verifier feedback is present:
   • Do NOT just refine the prompt — prompt-only changes plateau quickly.
-  • PREFER structural upgrades: LoRA, ControlNet, hires-fix, regional, inpaint.
-  • If ANY region_issue has fix_strategies containing "inject_lora_*" or
-    "add_controlnet_*", you MUST attempt that structural upgrade, not fall
-    back to prompt tweaking. Call query_available_models first; if a matching
-    model exists, read the corresponding skill and apply it.
+  • PREFER structural upgrades: LoRA, hires-fix, regional, inpaint.
+  • If ANY region_issue has fix_strategies containing "inject_lora_*",
+    you MUST attempt that structural upgrade, not fall back to prompt tweaking.
+    Call query_available_models first; if a matching model exists, read the
+    corresponding skill and apply it.
   • Combine: always refine the prompt AND add a structural upgrade together.
-  • Only fall back to prompt-only when no LoRA / ControlNet / inpaint models
-    are installed or the fix strategies are exclusively prompt-related.
+  • Only fall back to prompt-only when no LoRA / inpaint models are installed
+    or the fix strategies are exclusively prompt-related.
 
 Human-in-the-loop feedback
 --------------------------
@@ -203,25 +201,19 @@ Node parameter constraints (DO NOT violate)
   LoRA class is "LoraLoader" for SD/SDXL/Flux, "LoraLoaderModelOnly" for MMDiT/S3-DiT
   (Qwen-Image-2512, Z-Image-Turbo). The add_lora_loader tool selects the correct node
   automatically based on the detected architecture.
-  ControlNet apply class is "ControlNetApplyAdvanced" for SD/SDXL/Flux (conditioning-patch).
-  For Qwen-Image-2512 and Z-Image-Turbo, ControlNet is a MODEL patch: the loader is
-  "ModelPatchLoader" and the apply node is "QwenImageDiffsynthControlnet" /
-  "ZImageFunControlnet". add_controlnet handles this automatically and REQUIRES an
-  image_node_id (the control signal). No union_type argument for these nodes.
-  LongCat-Image does NOT support LoRA or ControlNet via standard tools — use set_param
+  LongCat-Image does NOT support LoRA via standard tools — use set_param
   to tune steps/guidance_scale; read_skill("longcat-image") for enhancement options.
 
 Available workflow tools (use ONLY these — no others exist)
 -----------------------------------------------------------
   inspect_workflow          — view all nodes, IDs, and inputs
-  query_available_models    — list checkpoints, LoRAs, controlnets, etc.
+  query_available_models    — list checkpoints, LoRAs, etc.
   set_param                 — set a scalar input: set_param(node_id, param_name, value)
   set_prompt                — set positive/negative prompt text (no node ID needed)
   add_node                  — add a new node: add_node(class_type, nickname, inputs={...})
   connect_nodes             — wire output to input: connect_nodes(src_node_id, src_output_index, dst_node_id, dst_input_name)
   delete_node               — remove a node by ID
   add_lora_loader           — insert LoRA between model/clip source and consumers
-  add_controlnet            — add ControlNet loader + apply node
   add_regional_attention    — split conditioning into foreground/background
   add_hires_fix             — add upscale + second KSampler pass
   add_inpaint_pass          — add targeted inpaint for a region
@@ -288,14 +280,14 @@ _TOOLS: list[dict] = [
         "query_available_models",
         (
             "Query the ComfyUI server for available models of a given type. "
-            "Call this BEFORE adding LoRA or ControlNet nodes."
+            "Call this BEFORE adding LoRA nodes."
         ),
         {
             "type": "object",
             "properties": {
                 "model_type": {
                     "type": "string",
-                    "description": "loras | controlnets | checkpoints | unets | vae | upscale_models | clip_vision",
+                    "description": "loras | checkpoints | unets | vae | upscale_models | clip_vision",
                 }
             },
             "required": ["model_type"],
@@ -373,48 +365,6 @@ _TOOLS: list[dict] = [
                 },
             },
             "required": ["lora_name", "model_node_id"],
-        },
-    ),
-    _tool(
-        "add_controlnet",
-        (
-            "Add a ControlNet branch to the workflow. "
-            "For SD/SDXL/Flux: uses ControlNetLoader + ControlNetApplyAdvanced "
-            "(conditioning-patch; wraps positive/negative before KSampler). "
-            "For Qwen-Image-2512 / Z-Image-Turbo: uses ModelPatchLoader + the matching "
-            "Fun/Diffsynth Controlnet node (QwenImageDiffsynthControlnet / "
-            "ZImageFunControlnet) which patch the MODEL directly and require a "
-            "reference image (image_node_id). "
-            "Not applicable for LongCat-Image. "
-            "Call query_available_models('controlnets') and ('model_patches') first."
-        ),
-        {
-            "type": "object",
-            "properties": {
-                "controlnet_name": {"type": "string"},
-                "preprocessor_class": {"type": "string"},
-                "image_node_id": {"type": "string"},
-                "positive_node_id": {"type": "string"},
-                "negative_node_id": {"type": "string"},
-                "strength": {"type": "number"},
-                "start_percent": {"type": "number"},
-                "end_percent": {"type": "number"},
-                "union_type": {
-                    "type": "string",
-                    "description": (
-                        "Only used for ControlNet Union variants on SD/SDXL/Flux. "
-                        "Ignored for Qwen-Image-2512 / Z-Image-Turbo (their patch "
-                        "nodes have no union_type input — the control mode is fixed "
-                        "by the patch file itself)."
-                    ),
-                },
-            },
-            "required": [
-                "controlnet_name",
-                "preprocessor_class",
-                "positive_node_id",
-                "negative_node_id",
-            ],
         },
     ),
     _tool(
@@ -694,26 +644,8 @@ class ArchConfig:
     lora_node: str           # ComfyUI class_type for the LoRA loader node
     lora_needs_clip: bool    # True → LoraLoader (MODEL+CLIP); False → model-only
 
-    # --- ControlNet ---
-    # cn_style selects the wiring pattern:
-    #   "conditioning"  → ControlNetLoader + apply node wrap positive/negative
-    #                     (standard SD/SDXL/Flux). Used when arch_cfg is None;
-    #                     registered archs may also opt in.
-    #   "model_patch"   → ModelPatchLoader + single patch node that takes
-    #                     (model, model_patch, vae, image, strength) → MODEL,
-    #                     then rewires all downstream consumers of the source
-    #                     MODEL to consume from the patched output. Used by
-    #                     Qwen-Image-2512 (QwenImageDiffsynthControlnet) and
-    #                     Z-Image-Turbo (ZImageFunControlnet).
-    cn_style: str = "conditioning"
-    cn_loader_node: str = ""  # class_type for CN / patch loader
-    cn_apply_node: str = ""   # class_type for CN apply / patch node
-    cn_strength_param: str = "strength"  # input name for strength
-    cn_has_union_type: bool = False      # whether the apply node takes union_type
-
     # --- Feature flags (optional, default True for backward compat) ---
     lora_supported: bool = True   # False for pipeline-based models with no MODEL tensor
-    cn_supported: bool = True     # False for pipeline-based models with no KSampler
 
 
 ARCH_REGISTRY: dict[str, ArchConfig] = {
@@ -723,17 +655,10 @@ ARCH_REGISTRY: dict[str, ArchConfig] = {
         clip_type_keywords=("qwen_image",),
         skill_name="qwen-image-2512",
         description=(
-            "Qwen-Image-2512 (20B MMDiT — LoraLoaderModelOnly for LoRA, "
-            "ModelPatchLoader + QwenImageDiffsynthControlnet for ControlNet; "
-            "only use ControlNet weights trained for Qwen-Image-2512)"
+            "Qwen-Image-2512 (20B MMDiT — LoraLoaderModelOnly for LoRA)"
         ),
         lora_node="LoraLoaderModelOnly",
         lora_needs_clip=False,
-        cn_style="model_patch",
-        cn_loader_node="ModelPatchLoader",
-        cn_apply_node="QwenImageDiffsynthControlnet",
-        cn_strength_param="strength",
-        cn_has_union_type=False,
     ),
     "z_image": ArchConfig(
         unet_keywords=("z_image",),
@@ -743,17 +668,10 @@ ARCH_REGISTRY: dict[str, ArchConfig] = {
         clip_type_keywords=("lumina2", "qwen3_4b"),
         skill_name="z-image-turbo",
         description=(
-            "Z-Image-Turbo (6B S3-DiT — LoraLoaderModelOnly for LoRA, "
-            "ModelPatchLoader + ZImageFunControlnet for ControlNet; "
-            "only use ControlNet weights trained for Z-Image-Turbo)"
+            "Z-Image-Turbo (6B S3-DiT — LoraLoaderModelOnly for LoRA)"
         ),
         lora_node="LoraLoaderModelOnly",
         lora_needs_clip=False,
-        cn_style="model_patch",
-        cn_loader_node="ModelPatchLoader",
-        cn_apply_node="ZImageFunControlnet",
-        cn_strength_param="strength",
-        cn_has_union_type=False,
     ),
     "longcat_image": ArchConfig(
         # Detection: the custom loader class_type is unambiguous
@@ -765,13 +683,11 @@ ARCH_REGISTRY: dict[str, ArchConfig] = {
             "LongCat-Image (6B by Meituan — custom pipeline nodes: "
             "LongCatImageModelLoader → LongCatImageTextToImage; "
             "use set_param for steps/guidance_scale; "
-            "LoRA and ControlNet are not available via standard tools for this arch)"
+            "LoRA is not available via standard tools for this arch)"
         ),
-        # LoRA/CN fields unused (lora_supported=False, cn_supported=False)
         lora_node="",
         lora_needs_clip=False,
         lora_supported=False,
-        cn_supported=False,
     ),
 }
 
@@ -822,6 +738,13 @@ class ClawAgent:
         # SFT trace: populated after each plan_and_patch() call
         self.last_messages: list[dict] | None = None
         self.last_token_usage: dict | None = None
+
+        # Skill tracking: which skills were read during the current prompt
+        self.skills_read: list[str] = []
+
+    def reset_skills_read(self) -> None:
+        """Clear the skills_read list (call between prompts)."""
+        self.skills_read = []
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -1043,9 +966,6 @@ class ClawAgent:
                 case "add_lora_loader":
                     return self._add_lora(wm, inputs), False
 
-                case "add_controlnet":
-                    return self._add_controlnet(wm, inputs), False
-
                 case "add_regional_attention":
                     return self._add_regional_attention(wm, inputs), False
 
@@ -1188,6 +1108,7 @@ class ClawAgent:
         except KeyError:
             available = ", ".join(self.skill_manager.skill_names)
             return f"❌ Skill {skill_name!r} not found. Available skills: {available or '(none)'}"
+        self.skills_read.append(skill_name)
         print(f"[ClawAgent] 📖 read_skill: {skill_name}")
         return f"## Instructions for skill: {skill_name}\n\n{body}"
 
@@ -1200,7 +1121,7 @@ class ClawAgent:
         """Detect a registered non-standard architecture from the workflow.
 
         Returns the matching ArchConfig, or None for standard SD/SDXL/Flux
-        pipelines (which use LoraLoader + ControlNetApplyAdvanced).
+        pipelines (which use LoraLoader).
         """
         for cfg in ARCH_REGISTRY.values():
             for node in wm.workflow.values():
@@ -1325,229 +1246,6 @@ class ClawAgent:
             f"   Re-wired model: {rewired_model}\n"
             f"   Re-wired clip:  {rewired_clip}"
         )
-
-    def _add_controlnet(self, wm: WorkflowManager, inputs: dict) -> str:
-        cn_name = inputs["controlnet_name"]
-        preproc_cls = inputs.get("preprocessor_class", "")
-        image_nid = str(inputs.get("image_node_id", ""))
-        pos_nid = str(inputs["positive_node_id"])
-        neg_nid = str(inputs["negative_node_id"])
-        strength = float(inputs.get("strength", 0.7))
-        start_pct = float(inputs.get("start_percent", 0.0))
-        end_pct = float(inputs.get("end_percent", 1.0))
-        arch = self._detect_arch(wm)
-
-        if arch is not None and not arch.cn_supported:
-            return (
-                f"⚠️ ControlNet is not supported for {arch.skill_name}. "
-                "This architecture uses custom pipeline nodes with no KSampler to wire conditioning into. "
-                "Read the skill for available enhancement strategies."
-            )
-
-        # Optional preprocessor — shared by both branches.
-        preproc_nid = None
-        preproc_output = None
-        if preproc_cls and image_nid:
-            preproc_nid = wm.add_node(preproc_cls, preproc_cls, image=[image_nid, 0])
-            preproc_output = [preproc_nid, 0]
-            self._notify(wm)
-        elif image_nid:
-            preproc_output = [image_nid, 0]
-
-        if arch is not None and arch.cn_style == "model_patch":
-            # Qwen-Image-2512, Z-Image-Turbo:
-            #   ModelPatchLoader(name=<fun cn file>) → MODEL_PATCH
-            #   <arch.cn_apply_node>(model, model_patch, vae, image, strength) → MODEL
-            # Rewire all existing consumers of the current KSampler-model source to
-            # instead consume from the patched MODEL output.
-            if not image_nid:
-                return (
-                    f"⚠️ ControlNet for {arch.skill_name} requires image_node_id "
-                    "(the control signal). Supply a LoadImage node or image source."
-                )
-
-            # Locate the current MODEL source that feeds the KSampler.
-            model_src_id: str | None = None
-            model_src_slot = 0
-            for nid, node in wm.workflow.items():
-                if node.get("class_type") == "KSampler":
-                    m = node.get("inputs", {}).get("model")
-                    if isinstance(m, list) and len(m) == 2:
-                        model_src_id = str(m[0])
-                        model_src_slot = int(m[1])
-                        break
-            if model_src_id is None:
-                return (
-                    f"⚠️ ControlNet for {arch.skill_name}: no KSampler with a model "
-                    "input found. Add a sampler first, or use set_param."
-                )
-
-            # Locate VAE source.
-            vae_src_id: str | None = None
-            vae_src_slot = 0
-            for nid, node in wm.workflow.items():
-                if node.get("class_type") == "VAELoader":
-                    vae_src_id = nid
-                    vae_src_slot = 0
-                    break
-            if vae_src_id is None:
-                for nid, node in wm.workflow.items():
-                    if node.get("class_type") in ("CheckpointLoaderSimple", "CheckpointLoader"):
-                        vae_src_id = nid
-                        vae_src_slot = 2
-                        break
-            if vae_src_id is None:
-                return (
-                    f"⚠️ ControlNet for {arch.skill_name}: no VAELoader in workflow. "
-                    "Add a VAELoader before applying ControlNet."
-                )
-
-            patch_loader_nid = wm.add_node(
-                arch.cn_loader_node,  # "ModelPatchLoader"
-                f"CN Patch Loader: {cn_name[:20]}",
-                name=cn_name,
-            )
-            self._notify(wm)
-
-            patch_inputs: dict = {
-                "model": [model_src_id, model_src_slot],
-                "model_patch": [patch_loader_nid, 0],
-                "vae": [vae_src_id, vae_src_slot],
-                arch.cn_strength_param: strength,
-            }
-            if preproc_output:
-                patch_inputs["image"] = preproc_output
-
-            patch_nid = wm.add_node(
-                arch.cn_apply_node,  # "ZImageFunControlnet" / "QwenImageDiffsynthControlnet"
-                f"CN: {cn_name[:25]}",
-                **patch_inputs,
-            )
-            self._notify(wm)
-
-            rewired = []
-            for nid, node in wm.workflow.items():
-                if nid in (patch_nid, patch_loader_nid):
-                    continue
-                for inp_name, inp_val in list(node.get("inputs", {}).items()):
-                    if (
-                        inp_name == "model"
-                        and isinstance(inp_val, list)
-                        and len(inp_val) == 2
-                        and str(inp_val[0]) == model_src_id
-                        and int(inp_val[1]) == model_src_slot
-                    ):
-                        wm.workflow[nid]["inputs"][inp_name] = [patch_nid, 0]
-                        rewired.append(f"{nid}.{inp_name}")
-
-            self._notify(wm)
-            parts = [
-                f"✅ ControlNet (model_patch) added ({arch.skill_name}):",
-                f"   Patch Loader: {patch_loader_nid} ({cn_name})",
-            ]
-            if preproc_cls and image_nid:
-                parts.append(f"   Preproc:      {preproc_nid} ({preproc_cls})")
-            parts.append(
-                f"   Patch Node:   {patch_nid} ({arch.cn_apply_node}, "
-                f"strength={strength})"
-            )
-            parts.append(f"   Re-wired model: {rewired}")
-            return "\n".join(parts)
-
-        if arch is not None and arch.cn_style == "conditioning":
-            # Registered arch that still uses conditioning-style apply.
-            cn_loader_nid = wm.add_node(
-                arch.cn_loader_node,
-                f"CN Loader: {cn_name[:20]}",
-                control_net_name=cn_name,
-            )
-            self._notify(wm)
-
-            apply_inputs: dict = {
-                "positive": [pos_nid, 0],
-                "negative": [neg_nid, 0],
-                "control_net": [cn_loader_nid, 0],
-                arch.cn_strength_param: strength,
-                "start_percent": start_pct,
-                "end_percent": end_pct,
-            }
-            if arch.cn_has_union_type:
-                apply_inputs["union_type"] = inputs.get("union_type", "canny")
-            if preproc_output:
-                apply_inputs["image"] = preproc_output
-
-            apply_nid = wm.add_node(arch.cn_apply_node, "CN Apply", **apply_inputs)
-            self._notify(wm)
-
-            for nid, node in wm.workflow.items():
-                if node.get("class_type") == "KSampler":
-                    for inp_name, inp_val in list(node["inputs"].items()):
-                        if isinstance(inp_val, list) and len(inp_val) == 2:
-                            src = str(inp_val[0])
-                            if src == pos_nid and inp_name == "positive":
-                                wm.workflow[nid]["inputs"]["positive"] = [apply_nid, 0]
-                            if src == neg_nid and inp_name == "negative":
-                                wm.workflow[nid]["inputs"]["negative"] = [apply_nid, 1]
-
-            self._notify(wm)
-            union_info = (
-                f", union_type={apply_inputs['union_type']}"
-                if arch.cn_has_union_type else ""
-            )
-            parts = [
-                f"✅ ControlNet branch added ({arch.skill_name}):",
-                f"   Loader:  {cn_loader_nid} ({cn_name})",
-            ]
-            if preproc_cls and image_nid:
-                parts.append(f"   Preproc: {preproc_nid} ({preproc_cls})")
-            parts.append(
-                f"   Apply:   {apply_nid} "
-                f"({arch.cn_strength_param}={strength}{union_info}, "
-                f"{start_pct:.1f}→{end_pct:.1f})"
-            )
-            return "\n".join(parts)
-
-        # Standard SD/SDXL/Flux: ControlNetLoader + ControlNetApplyAdvanced.
-        cn_loader_nid = wm.add_node(
-            "ControlNetLoader", f"CN: {cn_name[:25]}", control_net_name=cn_name
-        )
-        self._notify(wm)
-
-        apply_inputs = {
-            "positive": [pos_nid, 0],
-            "negative": [neg_nid, 0],
-            "control_net": [cn_loader_nid, 0],
-            "strength": strength,
-            "start_percent": start_pct,
-            "end_percent": end_pct,
-        }
-        if preproc_output:
-            apply_inputs["image"] = preproc_output
-
-        apply_nid = wm.add_node("ControlNetApplyAdvanced", "CN Apply", **apply_inputs)
-        self._notify(wm)
-
-        for nid, node in wm.workflow.items():
-            if node.get("class_type") == "KSampler":
-                for inp_name, inp_val in list(node["inputs"].items()):
-                    if isinstance(inp_val, list) and len(inp_val) == 2:
-                        src = str(inp_val[0])
-                        if src == pos_nid and inp_name == "positive":
-                            wm.workflow[nid]["inputs"]["positive"] = [apply_nid, 0]
-                        if src == neg_nid and inp_name == "negative":
-                            wm.workflow[nid]["inputs"]["negative"] = [apply_nid, 1]
-
-        self._notify(wm)
-        parts = [
-            "✅ ControlNet branch added:",
-            f"   Loader:  {cn_loader_nid} ({cn_name})",
-        ]
-        if preproc_cls and image_nid:
-            parts.append(f"   Preproc: {preproc_nid} ({preproc_cls})")
-        parts.append(
-            f"   Apply:   {apply_nid} (strength={strength}, {start_pct:.1f}→{end_pct:.1f})"
-        )
-        return "\n".join(parts)
 
     def _add_regional_attention(self, wm: WorkflowManager, inputs: dict) -> str:
         pos_nid = str(inputs["positive_node_id"])
@@ -1713,7 +1411,6 @@ class ClawAgent:
     def _query_models(self, model_type: str) -> str:
         type_map = {
             "loras": ("LoraLoader", "lora_name"),
-            "controlnets": ("ControlNetLoader", "control_net_name"),
             "checkpoints": ("CheckpointLoaderSimple", "ckpt_name"),
             "unets": ("UNETLoader", "unet_name"),
             "vae": ("VAELoader", "vae_name"),
@@ -1801,7 +1498,7 @@ class ClawAgent:
     def _extract_structural_hints(feedback: str) -> str:
         """Parse verifier feedback for structural upgrade directives.
 
-        Scans for fix_strategy keywords (inject_lora_*, add_controlnet_*,
+        Scans for fix_strategy keywords (inject_lora_*,
         add_hires_fix, add_inpaint_pass) and returns a formatted list of
         required structural actions.  Returns empty string when only
         prompt-level fixes are suggested.
@@ -1811,12 +1508,6 @@ class ClawAgent:
             "inject_lora_style": '→ `read_skill("lora-enhancement")` then `add_lora_loader` (style LoRA)',
             "inject_lora_anatomy": '→ `read_skill("lora-enhancement")` then `add_lora_loader` (anatomy LoRA)',
             "inject_lora_lighting": '→ `read_skill("lora-enhancement")` then `add_lora_loader` (lighting LoRA)',
-            "add_controlnet_canny": '→ `read_skill("controlnet-control")` then `add_controlnet` (canny edge)',
-            "add_controlnet_depth": '→ `read_skill("controlnet-control")` then `add_controlnet` (depth map)',
-            "add_controlnet_normal": '→ `read_skill("controlnet-control")` then `add_controlnet` (normal map)',
-            "add_controlnet_pose": '→ `read_skill("controlnet-control")` then `add_controlnet` (pose)',
-            "add_controlnet_tile": '→ `read_skill("controlnet-control")` then `add_controlnet` (tile)',
-            "add_controlnet_seg": '→ `read_skill("controlnet-control")` then `add_controlnet` (segmentation)',
             "add_hires_fix": '→ `read_skill("hires-fix")` then `add_hires_fix`',
             "add_inpaint_pass": "→ `add_inpaint_pass` for the affected region",
             "add_ip_adapter": "→ consider IP-Adapter if available",
@@ -1937,6 +1628,7 @@ class ClawAgent:
                 preloaded_body = None
 
             if preloaded_body:
+                self.skills_read.append(preloaded_skill_name)
                 parts.append(
                     f"## Pre-loaded Skill: {preloaded_skill_name}\n"
                     "The following skill instructions are pre-loaded for your active model. "

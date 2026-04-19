@@ -245,7 +245,7 @@ class TestEvolutionLog:
             node_count_before=5,
             node_count_after=7,
             node_ids_added=["6", "7"],
-            rationale="Added LoRA and ControlNet.",
+            rationale="Added LoRA and regional attention.",
             verifier_score=0.72,
         )
         s = entry.summary()

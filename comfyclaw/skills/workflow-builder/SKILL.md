@@ -42,8 +42,6 @@ you must use the correct output slot index. Wrong slot = ComfyUI 400 error.
 | **VAEDecode** | IMAGE | — | — |
 | **ModelSamplingAuraFlow** | MODEL | — | — |
 | **FluxGuidance** | CONDITIONING | — | — |
-| **ControlNetLoader** | CONTROL_NET | — | — |
-| **ControlNetApplyAdvanced** | positive (CONDITIONING) | negative (CONDITIONING) | — |
 | **LatentUpscaleBy** | LATENT | — | — |
 | **LongCatImageModelLoader** | LONGCAT_PIPE | — | — |
 | **LongCatImageTextToImage** | IMAGE | — | — |
@@ -80,7 +78,7 @@ If multiple models are available, prefer: Z-Image-Turbo > Qwen > LongCat-Image >
 (unless the user specifies a model or the pinned image model overrides).
 
 **LongCat-Image note:** This model uses custom pipeline nodes — no UNETLoader, no KSampler.
-Use Recipe H. LoRA and ControlNet are NOT available for this arch; use prompt tuning + parameter
+Use Recipe H. LoRA is NOT available for this arch; use prompt tuning + parameter
 tuning (guidance_scale, steps) instead.
 
 If checkpoints list is empty, also check `diffusion_models` — DiT-based models
@@ -357,7 +355,7 @@ n10 = add_node("SaveImage", "Save Image",
 ## Recipe G — Z-Image-Turbo
 
 **Read skill "z-image-turbo" for detailed guidance** — it covers sampler settings,
-LoRA stacking, and ControlNet usage for this model.
+LoRA stacking for this model.
 
 Z-Image-Turbo: 6B S3-DiT, BF16, 16 GB VRAM. Separate UNETLoader + CLIPLoader + VAELoader.
 **No ModelSamplingAuraFlow needed. CFG must be 0.0. Steps = 8.**
@@ -425,7 +423,7 @@ n9 = add_node("SaveImage", "Save Image",
 parameter tuning, and iteration strategy.
 
 LongCat-Image: 6B model by Meituan, BF16, ~17 GB VRAM. Uses custom pipeline nodes —
-NOT UNETLoader/KSampler. **No LoRA or ControlNet support.** Key strength: Chinese text rendering.
+NOT UNETLoader/KSampler. **No LoRA support.** Key strength: Chinese text rendering.
 
 ```python
 # 1. Load model — outputs LONGCAT_PIPE on slot 0
@@ -549,9 +547,6 @@ After building the base pipeline, enhance with these patterns:
 
 ### Add LoRA
 Call `add_lora_loader` composite tool — it auto-wires model+clip chains.
-
-### Add ControlNet
-Call `add_controlnet` composite tool — it adds loader + preprocessor + apply node.
 
 ### Add Hires Fix (upscale pass)
 Call `add_hires_fix` composite tool — adds LatentUpscaleBy + second KSampler + VAEDecode.

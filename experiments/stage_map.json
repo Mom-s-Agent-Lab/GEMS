@@ -209,8 +209,7 @@
       ],
       "agent_tools": [
         "set_prompt",
-        "add_regional_attention",
-        "add_controlnet"
+        "add_regional_attention"
       ],
       "node_count": 88
     },
@@ -463,7 +462,6 @@
         "Zoe_DepthAnythingPreprocessor"
       ],
       "agent_tools": [
-        "add_controlnet",
         "add_node"
       ],
       "node_count": 82
