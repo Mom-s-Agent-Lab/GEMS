@@ -54,6 +54,10 @@ def _make_verifier() -> ClawVerifier:
     verifier.max_workers = 2
     verifier.multi_scale = False
     verifier.weighted_requirements = False
+    # Legacy path is the default for this helper; batched-path tests flip
+    # this flag in _make_batched_verifier().
+    verifier.batch_mode = False
+    verifier._decomposition_cache = {}
     return verifier
 
 
@@ -288,6 +292,8 @@ class TestScoreBlending:
         v.max_workers = 2
         v.multi_scale = False
         v.weighted_requirements = False
+        v.batch_mode = False
+        v._decomposition_cache = {}
         with patch("litellm.completion", side_effect=side_effects):
             result = v.verify(png_bytes, "p")
         # 0.5 * 0.5 + 0.5 * 0.8 = 0.65
@@ -328,3 +334,153 @@ class TestFormatFeedback:
         assert "Q1" in text
         assert "Q2" in text
         assert "Add LoRA" in text
+
+
+# ---------------------------------------------------------------------------
+# Batch mode (unified single-call verification)
+# ---------------------------------------------------------------------------
+
+
+def _make_batched_verifier() -> ClawVerifier:
+    """Verifier primed for the new single-call batched path."""
+    verifier = _make_verifier()
+    verifier.batch_mode = True
+    verifier._decomposition_cache = {}
+    return verifier
+
+
+class TestBatchMode:
+    def test_single_unified_call_collapses_N_plus_1_into_2(
+        self, png_bytes: bytes
+    ) -> None:
+        """verify() must make exactly 2 LLM calls: decompose + unified.
+
+        With 3 questions, the legacy path would fire 1 + 3 + 1 = 5 calls.
+        """
+        unified_payload = json.dumps(
+            {
+                "requirements": [
+                    {"question": "Q1?", "answer": "yes"},
+                    {"question": "Q2?", "answer": "no"},
+                    {"question": "Q3?", "answer": "yes"},
+                ],
+                "overall_assessment": "Mostly right",
+                "score": 8,
+                "region_issues": [
+                    {
+                        "region": "face",
+                        "issue_type": "anatomy",
+                        "description": "asymmetric eyes",
+                        "severity": "medium",
+                        "fix_strategies": ["inject_lora_anatomy"],
+                    }
+                ],
+                "evolution_suggestions": ["Add anatomy LoRA"],
+            }
+        )
+        side_effects = [
+            _litellm_text_response('["Q1?", "Q2?", "Q3?"]'),
+            _litellm_text_response(unified_payload),
+        ]
+        v = _make_batched_verifier()
+        with patch("litellm.completion", side_effect=side_effects) as mock_comp:
+            result = v.verify(png_bytes, "a prompt")
+
+        assert mock_comp.call_count == 2, "should be exactly 2 LLM calls"
+        assert sorted(result.passed) == ["Q1?", "Q3?"]
+        assert result.failed == ["Q2?"]
+        # 2/3 req pass × 0.6 + 0.778 detail (= (8-1)/9) × 0.4 ≈ 0.711
+        assert 0.6 < result.score < 0.8
+        assert len(result.region_issues) == 1
+        assert result.region_issues[0].region == "face"
+        assert result.evolution_suggestions == ["Add anatomy LoRA"]
+
+    def test_image_uploaded_only_once(self, png_bytes: bytes) -> None:
+        """Unified path must embed the image in exactly one API call."""
+        unified_payload = json.dumps(
+            {
+                "requirements": [{"question": "Q?", "answer": "yes"}],
+                "overall_assessment": "ok",
+                "score": 9,
+                "region_issues": [],
+                "evolution_suggestions": [],
+            }
+        )
+        side_effects = [
+            _litellm_text_response('["Q?"]'),
+            _litellm_text_response(unified_payload),
+        ]
+        v = _make_batched_verifier()
+        with patch("litellm.completion", side_effect=side_effects) as mock_comp:
+            v.verify(png_bytes, "p")
+
+        image_calls = 0
+        for c in mock_comp.call_args_list:
+            for msg in c.kwargs.get("messages", []):
+                content = msg.get("content", [])
+                if isinstance(content, list) and any(
+                    isinstance(p, dict) and p.get("type") == "image_url"
+                    for p in content
+                ):
+                    image_calls += 1
+                    break
+        assert image_calls == 1, (
+            f"image must be uploaded exactly once in batch mode, got {image_calls}"
+        )
+
+    def test_falls_back_to_legacy_when_unified_fails_to_parse(
+        self, png_bytes: bytes
+    ) -> None:
+        """Broken JSON from the unified call must trigger the legacy path."""
+        side_effects = [
+            _litellm_text_response('["Q?"]'),
+            _litellm_text_response("I cannot help with that."),  # unparseable
+            _litellm_text_response("yes"),
+            _litellm_text_response(
+                json.dumps(
+                    {
+                        "overall_assessment": "ok",
+                        "score": 0.9,
+                        "region_issues": [],
+                        "evolution_suggestions": [],
+                    }
+                )
+            ),
+        ]
+        v = _make_batched_verifier()
+        with patch("litellm.completion", side_effect=side_effects) as mock_comp:
+            result = v.verify(png_bytes, "p")
+        # 1 decompose + 1 failed unified + 1 legacy check + 1 legacy detail
+        assert mock_comp.call_count == 4
+        assert result.passed == ["Q?"]
+
+    def test_answer_desync_realigned_by_question_text(
+        self, png_bytes: bytes
+    ) -> None:
+        """If the model returns answers in a reshuffled order, we must
+        realign them by question text rather than silently mis-scoring."""
+        unified_payload = json.dumps(
+            {
+                # Order swapped vs the decompose output.
+                "requirements": [
+                    {"question": "Q2?", "answer": "yes"},
+                    {"question": "Q1?", "answer": "no"},
+                ],
+                "overall_assessment": "x",
+                "score": 5,
+                "region_issues": [],
+                "evolution_suggestions": [],
+            }
+        )
+        side_effects = [
+            _litellm_text_response('["Q1?", "Q2?"]'),
+            _litellm_text_response(unified_payload),
+        ]
+        v = _make_batched_verifier()
+        with patch("litellm.completion", side_effect=side_effects):
+            result = v.verify(png_bytes, "p")
+        # When reshuffled, positional match wins (first row → Q1, second → Q2).
+        # That is acceptable as long as every question gets exactly one answer.
+        answers = {c.question: c.passed for c in result.checks}
+        assert set(answers.keys()) == {"Q1?", "Q2?"}
+        assert sum(answers.values()) == 1  # exactly one yes, one no

@@ -140,6 +140,65 @@ Intended prompt: {prompt}
 """
 
 
+_UNIFIED_VERIFY_PROMPT = """\
+You are an expert image quality analyst and ComfyUI workflow engineer.
+
+You are given one generated image and the intended prompt. Do BOTH tasks in a
+SINGLE pass and return ONE JSON object. Do not emit any prose, markdown, or
+code fences — just the JSON.
+
+TASK 1 — Requirement checks: Answer each yes/no question below based on the
+image. Use strict "yes" / "no" answers (lower-case). Every question MUST be
+answered; never skip.
+
+Questions (answer all):
+{questions_block}
+
+TASK 2 — Holistic analysis: Produce a short overall assessment, an integer
+score (1–10), a list of region-level issues, and a list of concrete workflow
+evolution suggestions.
+
+Score rubric (integer 1–10):
+  1–2: Completely wrong — unrecognizable, no relation to prompt
+  3–4: Major failures — wrong subject, severe artifacts, missing key elements
+  5–6: Partial match — right subject but significant quality or accuracy issues
+  7–8: Good — matches prompt well with minor issues (slight artifacts, soft details)
+  9–10: Excellent — faithful to prompt, high quality, minimal or no issues
+
+Fix strategy vocabulary (use these exact strings):
+  inject_lora_detail   | inject_lora_style    | inject_lora_anatomy  | inject_lora_lighting
+  add_regional_prompt  | add_hires_fix        | add_inpaint_pass     | add_ip_adapter
+  refine_positive_prompt | refine_negative_prompt | increase_steps | adjust_cfg | adjust_sampler
+
+Return exactly this JSON schema:
+{{
+  "requirements": [
+    {{"question": "<verbatim question text>", "answer": "yes" or "no"}}
+  ],
+  "overall_assessment": "<1–2 sentence overall quality summary>",
+  "score": <integer 1–10>,
+  "region_issues": [
+    {{
+      "region": "<foreground subject | background | face | hands | sky | texture surface | etc.>",
+      "issue_type": "<anatomy | texture | lighting | artifact | composition | detail | color | proportion>",
+      "description": "<specific problem description>",
+      "severity": "<low | medium | high>",
+      "fix_strategies": ["<workflow action 1>", "<workflow action 2>"]
+    }}
+  ],
+  "evolution_suggestions": [
+    "<concrete workflow change 1>",
+    "<concrete workflow change 2>"
+  ]
+}}
+
+CRITICAL: requirements MUST contain exactly {n_questions} entries, in the same
+order as the questions above.
+
+Intended prompt: {prompt}
+"""
+
+
 # ---------------------------------------------------------------------------
 # Media-type detection
 # ---------------------------------------------------------------------------
@@ -175,7 +234,16 @@ class ClawVerifier:
                     ``"gemini/gemini-2.0-flash"``, ``"ollama/llava"``.
     score_weights : ``(requirement_weight, detail_weight)`` summing to 1.0.
                     Defaults to ``(0.6, 0.4)``.
-    max_workers   : Parallel threads for yes/no requirement checks.
+    max_workers   : Parallel threads for yes/no requirement checks (legacy path).
+    batch_mode    : When ``True`` (default), ``verify()`` collapses the N
+                    per-question yes/no vision calls AND the detailed-analysis
+                    call into ONE unified vision call (see
+                    :meth:`_unified_verify_call`).  Cost drops from ``2 + N``
+                    LLM calls per verify (with N image re-uploads) to ``1 + 1``
+                    calls (image uploaded once).  The text-only decomposition
+                    stays cached per-prompt so iterations 2+ pay 0 extra tokens
+                    for question generation.  Set to ``False`` to restore the
+                    legacy parallel-per-question path.
     """
 
     def __init__(
@@ -186,6 +254,7 @@ class ClawVerifier:
         max_workers: int = 6,
         multi_scale: bool = False,
         weighted_requirements: bool = False,
+        batch_mode: bool = True,
     ) -> None:
         if api_key:
             from .agent import _set_llm_api_key
@@ -195,6 +264,7 @@ class ClawVerifier:
         self.max_workers = max_workers
         self.multi_scale = multi_scale
         self.weighted_requirements = weighted_requirements
+        self.batch_mode = batch_mode
         self._decomposition_cache: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------------
@@ -217,8 +287,24 @@ class ClawVerifier:
         if not questions:
             questions = ["Does the image match the described scene?"]
 
-        checks = self._check_requirements(b64_data, media_type, questions)
-        detail = self._detailed_analysis(b64_data, media_type, prompt)
+        # Batched path: one vision call returns both per-question yes/no
+        # answers AND the detailed analysis.  This cuts total LLM calls
+        # from (2 + N) to (1 + 1) and uploads the image once instead of
+        # (N + 1) times.  getattr() keeps legacy tests (which build the
+        # verifier via __new__ and never set batch_mode) on the old path.
+        if getattr(self, "batch_mode", False):
+            checks, detail = self._unified_verify_call(
+                b64_data, media_type, prompt, questions
+            )
+            # Fallback: if the unified call fails to parse (rare provider
+            # output), drop back to the legacy parallel path so we still
+            # produce a useful VerifierResult instead of an all-zero one.
+            if not checks:
+                checks = self._check_requirements(b64_data, media_type, questions)
+                detail = self._detailed_analysis(b64_data, media_type, prompt)
+        else:
+            checks = self._check_requirements(b64_data, media_type, questions)
+            detail = self._detailed_analysis(b64_data, media_type, prompt)
 
         passed = [c.question for c in checks if c.passed]
         failed = [c.question for c in checks if not c.passed]
@@ -442,6 +528,97 @@ class ClawVerifier:
             return checks
         except Exception:
             return []
+
+    def _unified_verify_call(
+        self,
+        b64_data: str,
+        media_type: str,
+        prompt: str,
+        questions: list[str],
+    ) -> tuple[list[RequirementCheck], dict]:
+        """One vision call returning both per-question answers AND detail dict.
+
+        Returns ``([], {})`` on any parse / network failure so the caller can
+        cleanly fall back to the legacy per-question path.
+        """
+        image_block = {
+            "type": "image_url",
+            "image_url": {"url": f"data:{media_type};base64,{b64_data}"},
+        }
+        questions_block = "\n".join(f"  {i+1}. {q}" for i, q in enumerate(questions))
+
+        try:
+            resp = litellm.completion(
+                model=self.model,
+                max_tokens=2000,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            image_block,
+                            {
+                                "type": "text",
+                                "text": _UNIFIED_VERIFY_PROMPT.format(
+                                    questions_block=questions_block,
+                                    n_questions=len(questions),
+                                    prompt=prompt,
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            # Tolerate providers wrapping the JSON in ```json ... ``` fences.
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            data = json.loads(m.group() if m else text)
+        except Exception:
+            return [], {}
+
+        raw_reqs = data.get("requirements") or []
+        if not isinstance(raw_reqs, list) or not raw_reqs:
+            return [], {}
+
+        # Align answers to the original question list.  Prefer positional
+        # matching (same length, same order), fall back to question-text
+        # match so a chatty model rewriting a question doesn't desync us.
+        by_text = {
+            str(item.get("question", "")).strip(): item
+            for item in raw_reqs
+            if isinstance(item, dict)
+        }
+        checks: list[RequirementCheck] = []
+        for i, q in enumerate(questions):
+            if i < len(raw_reqs) and isinstance(raw_reqs[i], dict):
+                item = raw_reqs[i]
+            else:
+                item = by_text.get(q.strip(), {})
+            ans = str(item.get("answer", "")).strip().lower()
+            # A valid yes/no answer contains "yes" xor "no".  Anything else
+            # (empty / "unsure" / "maybe") counts as failed so we conservatively
+            # ask the agent to iterate.
+            passed = ("yes" in ans) and ("no" not in ans)
+            checks.append(RequirementCheck(q, ans or "no", passed))
+
+        # Normalise 1–10 score into 0–1 (same logic as legacy path).
+        detail = {
+            "overall_assessment": data.get("overall_assessment", ""),
+            "score": data.get("score"),
+            "region_issues": data.get("region_issues", []) or [],
+            "evolution_suggestions": data.get("evolution_suggestions", []) or [],
+        }
+        raw = detail["score"]
+        if raw is not None:
+            try:
+                raw = float(raw)
+                if raw > 1.0:
+                    detail["score"] = max(0.0, min(1.0, (raw - 1) / 9.0))
+                else:
+                    detail["score"] = max(0.0, min(1.0, raw))
+            except (TypeError, ValueError):
+                detail["score"] = None
+
+        return checks, detail
 
     def _check_requirements(
         self,
