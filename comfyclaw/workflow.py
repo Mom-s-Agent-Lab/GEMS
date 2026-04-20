@@ -413,6 +413,97 @@ class WorkflowManager:
 
         return errors
 
+    #: Conditioning-family node classes that only make sense when something
+    #: downstream (ultimately a sampler) consumes their output.  When
+    #: ``add_regional_attention`` / similar structural edits rewire
+    #: ``KSampler.positive``, the old conditioning subgraph often becomes
+    #: unreachable but stays in the workflow — ComfyUI then raises
+    #: ``exception_during_inner_validation`` for whatever dangling edges remain
+    #: inside that subgraph.  ``prune_orphan_conditioning`` removes these.
+    _CONDITIONING_FAMILY: frozenset[str] = frozenset(
+        {
+            "CLIPTextEncode",
+            "CLIPTextEncodeSDXL",
+            "CLIPTextEncodeSD3",
+            "CLIPTextEncodeHunyuan",
+            "T5TextEncode",
+            "FLUXTextEncode",
+            "WanTextEncode",
+            "ConditioningAverage",
+            "ConditioningCombine",
+            "ConditioningConcat",
+            "ConditioningSetArea",
+            "ConditioningSetAreaPercentage",
+            "ConditioningSetMask",
+            "ConditioningSetTimestepRange",
+            "ConditioningZeroOut",
+            "FluxGuidance",
+        }
+    )
+
+    @classmethod
+    def prune_orphan_conditioning(cls, workflow: dict) -> list[str]:
+        """Remove Conditioning-family / text-encoder nodes that nothing consumes.
+
+        After a structural mutation (e.g. ``add_regional_attention`` rewriting
+        every ``KSampler.positive`` edge), the previous iteration's
+        conditioning subgraph is often left hanging with no downstream
+        consumer.  ComfyUI's validator still walks those nodes and raises
+        ``exception_during_inner_validation`` for broken references inside
+        the orphaned island, taking the whole submission down with it.
+
+        This pass iteratively deletes any :data:`_CONDITIONING_FAMILY` node
+        whose output is not referenced by any surviving node.  Loaders,
+        samplers, VAE, and output nodes are never pruned.
+
+        Returns a list of human-readable log entries describing what was
+        removed (empty if nothing needed pruning).
+        """
+        if not workflow:
+            return []
+
+        removed: list[str] = []
+        changed = True
+        while changed:
+            changed = False
+            # Which node IDs still have at least one inbound reference?
+            referenced: set[str] = set()
+            for node in workflow.values():
+                for val in node.get("inputs", {}).values():
+                    if (
+                        isinstance(val, list)
+                        and len(val) == 2
+                        and isinstance(val[0], str | int)
+                    ):
+                        referenced.add(str(val[0]))
+
+            for nid in list(workflow.keys()):
+                node = workflow[nid]
+                ct = node.get("class_type", "")
+                if ct not in cls._CONDITIONING_FAMILY:
+                    continue
+                if nid in referenced:
+                    continue
+                title = node.get("_meta", {}).get("title") or ct
+                del workflow[nid]
+                # Scrub dangling inbound links pointing at the removed node.
+                for other in workflow.values():
+                    stale = [
+                        k
+                        for k, v in other.get("inputs", {}).items()
+                        if (
+                            isinstance(v, list)
+                            and len(v) == 2
+                            and str(v[0]) == str(nid)
+                        )
+                    ]
+                    for k in stale:
+                        del other["inputs"][k]
+                removed.append(f"[{nid}] {ct} ({title}) — no downstream consumer")
+                changed = True
+
+        return removed
+
     @classmethod
     def ensure_output_wiring(cls, workflow: dict) -> list[str]:
         """Auto-fix common SaveImage/PreviewImage wiring issues.

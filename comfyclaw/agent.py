@@ -386,7 +386,11 @@ _TOOLS: list[dict] = [
         "add_regional_attention",
         (
             "Split conditioning into foreground and background regional prompts using "
-            "BREAK tokens + ConditioningCombine."
+            "BREAK tokens + ConditioningCombine.  foreground_weight is the "
+            "ConditioningAverage.conditioning_to_strength on the foreground branch; "
+            "ComfyUI clamps this to [0.0, 1.0] and rejects the whole workflow "
+            "with prompt_outputs_failed_validation if you exceed the max. "
+            "Leave it unset to use the safe default of 1.0 (full foreground weight)."
         ),
         {
             "type": "object",
@@ -395,7 +399,12 @@ _TOOLS: list[dict] = [
                 "clip_node_id": {"type": "string"},
                 "foreground_prompt": {"type": "string"},
                 "background_prompt": {"type": "string"},
-                "foreground_weight": {"type": "number"},
+                "foreground_weight": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "default": 1.0,
+                },
             },
             "required": [
                 "positive_node_id",
@@ -1365,7 +1374,18 @@ class ClawAgent:
         clip_nid = str(inputs["clip_node_id"])
         fg_prompt = inputs["foreground_prompt"]
         bg_prompt = inputs["background_prompt"]
-        fg_weight = float(inputs.get("foreground_weight", 1.3))
+        # ComfyUI's ConditioningAverage.conditioning_to_strength is clamped
+        # to [0.0, 1.0]; anything outside that range triggers
+        # prompt_outputs_failed_validation and wastes an iteration.  Historic
+        # default here was 1.3 which caused ~50% of all validation rejections
+        # in batch runs — clamp defensively and default to 1.0.
+        raw_fg_weight = float(inputs.get("foreground_weight", 1.0))
+        fg_weight = max(0.0, min(1.0, raw_fg_weight))
+        if fg_weight != raw_fg_weight:
+            print(
+                f"[ClawAgent] ⚠️ foreground_weight={raw_fg_weight} out of "
+                f"ComfyUI's [0.0, 1.0] range — clamped to {fg_weight}."
+            )
 
         if pos_nid in wm.workflow:
             meta = wm.workflow[pos_nid].setdefault("_meta", {})

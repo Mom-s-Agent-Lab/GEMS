@@ -358,6 +358,10 @@ class TestRepairLoop:
 
         cfg.max_iterations = 1
         cfg.max_repair_attempts = 2
+        # B3: opt out of the non-productive-iteration refund so this test
+        # keeps exercising the single-pass repair-exhaustion path.  The
+        # separate TestNonProductiveBudget class covers the refund behaviour.
+        cfg.max_extra_agent_invocations = 0
         h = _make_harness(minimal_workflow, cfg, client=mock_client)
         result = h.run("test")
 

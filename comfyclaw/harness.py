@@ -20,10 +20,11 @@ behaviour.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .agent import ClawAgent
@@ -32,7 +33,12 @@ from .experience_db import ExperienceDB
 from .memory import ClawMemory
 from .skill_manager import evolved_dir_for
 from .sync_server import SyncServer
-from .verifier import ClawVerifier, VerifierResult
+from .verifier import (
+    ClawVerifier,
+    RegionIssue,
+    RequirementCheck,
+    VerifierResult,
+)
 from .workflow import WorkflowManager
 
 # Map from ``image_model`` keyword → short tag used both for auto-deriving
@@ -65,6 +71,123 @@ _INFRA_ERROR_SIGNALS = (
     "[Errno 32] Broken pipe",
     "BrokenPipeError",
 )
+
+
+# ---------------------------------------------------------------------------
+# Baseline cache (B5)
+# ---------------------------------------------------------------------------
+#
+# The unmodified base workflow is deterministic given (workflow + prompt +
+# image_model) — rerunning it wastes ~34s of GPU time and one verifier call
+# per prompt across a benchmark run.  We content-address the inputs and store
+# the (image bytes, verifier result) pair on disk; on cache hit we skip
+# ComfyUI + verifier entirely.
+
+
+def _baseline_cache_key(
+    base_workflow: dict,
+    prompt: str,
+    image_model: str | None,
+) -> str:
+    """Return the sha256 hex digest used as the on-disk cache filename stem.
+
+    Canonical JSON (sorted keys, no whitespace) keeps the digest stable
+    across Python processes and dict-insertion order changes.
+    """
+    payload = {
+        "workflow": base_workflow,
+        "prompt": prompt,
+        "image_model": image_model,
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _verifier_result_to_json(vr: VerifierResult | None) -> dict | None:
+    """Serialize a ``VerifierResult`` (with nested dataclasses) to a JSON-safe dict."""
+    if vr is None:
+        return None
+    return asdict(vr)
+
+
+def _verifier_result_from_json(data: dict | None) -> VerifierResult | None:
+    """Reconstruct a ``VerifierResult`` produced by :func:`_verifier_result_to_json`."""
+    if not data:
+        return None
+    checks = [RequirementCheck(**c) for c in data.get("checks", [])]
+    region_issues = [RegionIssue(**r) for r in data.get("region_issues", [])]
+    return VerifierResult(
+        score=data.get("score", 0.0),
+        checks=checks,
+        passed=list(data.get("passed", [])),
+        failed=list(data.get("failed", [])),
+        region_issues=region_issues,
+        overall_assessment=data.get("overall_assessment", ""),
+        evolution_suggestions=list(data.get("evolution_suggestions", [])),
+        feedback_source=data.get("feedback_source", "vlm"),
+    )
+
+
+class _BaselineCache:
+    """Tiny on-disk cache for the baseline-first pass.
+
+    Files are stored as::
+
+        <cache_dir>/<sha256>.webp       # image bytes (raw, whatever ComfyUI returned)
+        <cache_dir>/<sha256>.json       # { "verifier": {...}, "prompt": str, "image_model": str }
+
+    Missing .json or .webp is treated as a miss.  On corruption we silently
+    fall through to a miss so a bad cache file never breaks a live run.
+    """
+
+    def __init__(self, cache_dir: str | Path) -> None:
+        self.dir = Path(cache_dir)
+        self.dir.mkdir(parents=True, exist_ok=True)
+
+    def _img_path(self, key: str) -> Path:
+        return self.dir / f"{key}.webp"
+
+    def _meta_path(self, key: str) -> Path:
+        return self.dir / f"{key}.json"
+
+    def lookup(self, key: str) -> tuple[bytes, VerifierResult | None] | None:
+        img_path = self._img_path(key)
+        meta_path = self._meta_path(key)
+        if not img_path.exists() or not meta_path.exists():
+            return None
+        try:
+            img_bytes = img_path.read_bytes()
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return img_bytes, _verifier_result_from_json(meta.get("verifier"))
+
+    def store(
+        self,
+        key: str,
+        image_bytes: bytes,
+        verifier_result: VerifierResult | None,
+        prompt: str,
+        image_model: str | None,
+    ) -> None:
+        try:
+            self._img_path(key).write_bytes(image_bytes)
+            self._meta_path(key).write_text(
+                json.dumps(
+                    {
+                        "verifier": _verifier_result_to_json(verifier_result),
+                        "prompt": prompt,
+                        "image_model": image_model,
+                        "stored_at": time.time(),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            # Cache write failures are non-fatal — just log and carry on.
+            print(f"[ClawHarness] ⚠ Baseline cache write failed ({exc}); continuing without caching.")
 
 from typing import Callable
 
@@ -149,6 +272,14 @@ class HarnessConfig:
     score_weights: tuple[float, float] = field(default_factory=lambda: (0.6, 0.4))
     image_model: str | None = None
     max_repair_attempts: int = 2
+    # B3: when an iteration never gets past ComfyUI's pre-flight validator
+    # (``prompt_outputs_failed_validation`` / ``exception_during_inner_validation``
+    # / timeout), no image is generated, so we don't charge it against
+    # ``max_iterations``.  ``max_extra_agent_invocations`` caps the TOTAL number
+    # of extra plan/tool agent calls we'll tolerate across those non-productive
+    # iterations for a single prompt, so a prompt can't spin forever if its
+    # validation errors keep recurring.
+    max_extra_agent_invocations: int = 2
     verifier_mode: str = "vlm"  # "vlm", "human", or "hybrid"
     # Batch verifier: collapse the per-question yes/no vision calls + the
     # detailed-analysis call into ONE unified call (2 + N → 1 + 1 LLM calls,
@@ -159,6 +290,13 @@ class HarnessConfig:
     complexity_penalty: float = 0.02
     experience_db_path: str | None = None
     baseline_first: bool = False
+    # B5: when set, cache the baseline-first generation (image + verifier
+    # result) at ``<baseline_cache_dir>/<sha256(workflow,prompt,image_model)>.webp``
+    # and skip ComfyUI + verifier on subsequent runs of the same triple.
+    # Typically set by run_benchmark.py to
+    # ``<results_dir>/.baseline_cache`` so each benchmark/model combo gets
+    # its own cache.  ``None`` disables caching.
+    baseline_cache_dir: str | None = None
     cross_prompt_context: str | None = None
     """
     Pin the image-generation model (checkpoint / UNET) used by ComfyUI.
@@ -445,25 +583,27 @@ class ClawHarness:
         # using the untouched base pipeline so there is always a guaranteed
         # baseline.  The agent then evolves on top of this in later iterations.
         if cfg.baseline_first and self.base_workflow:
-            print("[ClawHarness] 🏁 Baseline-first: generating from unmodified base workflow…")
             wm_base = WorkflowManager(copy.deepcopy(self.base_workflow))
             pos_inj, _ = wm_base.inject_prompt(positive=prompt)
-            if pos_inj:
-                print(f"[ClawHarness] 📝 Seeded user prompt into encoder node(s) {pos_inj}")
-            WorkflowManager.ensure_output_wiring(wm_base.workflow)
-            try:
-                qr = self._client.queue_prompt(wm_base.workflow)
-                history = self._client.wait_for_completion(qr["prompt_id"], timeout=300)
-                images = self._client.collect_images(history)
-                if images:
-                    base_img = images[0]
-                    base_vr = (
-                        self._verifier.verify(base_img, prompt)
-                        if not dry_run and self._verifier is not None
-                        else None
-                    )
+
+            # B5: consult the on-disk baseline cache first.  Key hashes the
+            # pre-inject base workflow + prompt + pinned model — all three
+            # are what determine the deterministic output.
+            cache: _BaselineCache | None = None
+            cache_key: str | None = None
+            if cfg.baseline_cache_dir:
+                cache = _BaselineCache(cfg.baseline_cache_dir)
+                cache_key = _baseline_cache_key(
+                    self.base_workflow, prompt, cfg.image_model
+                )
+                hit = cache.lookup(cache_key)
+                if hit is not None:
+                    base_img, base_vr = hit
                     base_score = base_vr.score if base_vr else 0.0
-                    print(f"[ClawHarness] 🏁 Baseline score: {base_score:.3f}")
+                    print(
+                        f"[ClawHarness] 💾 Baseline cache HIT ({cache_key[:12]}…) — "
+                        f"score={base_score:.3f}, skipping ComfyUI."
+                    )
                     best_image = base_img
                     best_score = base_score
                     best_workflow_snapshot = copy.deepcopy(wm_base.workflow)
@@ -474,13 +614,65 @@ class ClawHarness:
                         verifier_score=base_score,
                         passed=base_vr.passed if base_vr else [],
                         failed=base_vr.failed if base_vr else [],
-                        experience="Baseline generation from warm-start workflow.",
+                        experience="Baseline generation from cache (B5).",
                         image_bytes=base_img,
                     )
+                    if best_score >= cfg.success_threshold:
+                        print(
+                            f"[ClawHarness] ✅ Baseline score {best_score:.2f} ≥ threshold "
+                            f"{cfg.success_threshold} — skipping evolution."
+                        )
+                        self._print_summary(best_score)
+                        return best_image
+                    # Cache hit handled — skip the fresh-generation block below.
+                    cfg_cached_baseline = True
                 else:
-                    print("[ClawHarness] ⚠️ Baseline: no images in output")
-            except Exception as exc:
-                print(f"[ClawHarness] ⚠️ Baseline generation failed: {exc}")
+                    print(
+                        f"[ClawHarness] 💾 Baseline cache MISS ({cache_key[:12]}…) — "
+                        f"generating and storing."
+                    )
+                    cfg_cached_baseline = False
+            else:
+                cfg_cached_baseline = False
+
+            if not cfg_cached_baseline:
+                print("[ClawHarness] 🏁 Baseline-first: generating from unmodified base workflow…")
+                if pos_inj:
+                    print(f"[ClawHarness] 📝 Seeded user prompt into encoder node(s) {pos_inj}")
+                WorkflowManager.ensure_output_wiring(wm_base.workflow)
+                try:
+                    qr = self._client.queue_prompt(wm_base.workflow)
+                    history = self._client.wait_for_completion(qr["prompt_id"], timeout=300)
+                    images = self._client.collect_images(history)
+                    if images:
+                        base_img = images[0]
+                        base_vr = (
+                            self._verifier.verify(base_img, prompt)
+                            if not dry_run and self._verifier is not None
+                            else None
+                        )
+                        base_score = base_vr.score if base_vr else 0.0
+                        print(f"[ClawHarness] 🏁 Baseline score: {base_score:.3f}")
+                        best_image = base_img
+                        best_score = base_score
+                        best_workflow_snapshot = copy.deepcopy(wm_base.workflow)
+                        last_result = base_vr
+                        self._memory.record(
+                            iteration=0,
+                            workflow_snapshot=wm_base.workflow,
+                            verifier_score=base_score,
+                            passed=base_vr.passed if base_vr else [],
+                            failed=base_vr.failed if base_vr else [],
+                            experience="Baseline generation from warm-start workflow.",
+                            image_bytes=base_img,
+                        )
+                        if cache is not None and cache_key is not None:
+                            cache.store(cache_key, base_img, base_vr, prompt, cfg.image_model)
+                            print(f"[ClawHarness] 💾 Baseline cached at {cache_key[:12]}…")
+                    else:
+                        print("[ClawHarness] ⚠️ Baseline: no images in output")
+                except Exception as exc:
+                    print(f"[ClawHarness] ⚠️ Baseline generation failed: {exc}")
 
             if best_score >= cfg.success_threshold:
                 print(
@@ -490,7 +682,25 @@ class ClawHarness:
                 self._print_summary(best_score)
                 return best_image
 
-        for iteration in range(1, cfg.max_iterations + 1):
+        # B3: we count PRODUCTIVE iterations (ones where ComfyUI accepted our
+        # workflow past pre-flight validation) against cfg.max_iterations.  An
+        # iteration that never clears the validator (prompt_id stays None even
+        # after max_repair_attempts) does not consume the iter budget, up to
+        # cfg.max_extra_agent_invocations additional tries.  This stops a hard
+        # prompt from spending its whole iter budget on 3 back-to-back
+        # ``prompt_outputs_failed_validation`` loops and never generating a
+        # single image.
+        iteration = 0
+        extra_non_productive = 0
+        while iteration < cfg.max_iterations:
+            if extra_non_productive > cfg.max_extra_agent_invocations:
+                print(
+                    f"[ClawHarness] ⏭ Stopping: {extra_non_productive} "
+                    f"consecutive non-productive iterations exceeded "
+                    f"max_extra_agent_invocations={cfg.max_extra_agent_invocations}."
+                )
+                break
+            iteration += 1
             self._current_iteration = iteration
             print(f"\n--- Iteration {iteration}/{cfg.max_iterations} ---")
             self._emit_status("running", iteration, f"Iteration {iteration}/{cfg.max_iterations}")
@@ -583,6 +793,16 @@ class ClawHarness:
             if cfg.image_model:
                 wm.apply_image_model(cfg.image_model)
 
+            # ── Prune orphan conditioning nodes ──────────────────────────
+            # After regional-control / structural rewiring the previous
+            # iteration's CLIPTextEncode / Conditioning* nodes are often left
+            # dangling; ComfyUI still validates them and raises
+            # exception_during_inner_validation for broken refs inside the
+            # orphan island, killing the whole submission.
+            pruned = WorkflowManager.prune_orphan_conditioning(wm.workflow)
+            if pruned:
+                print(f"[ClawHarness] 🧹 Pruned {len(pruned)} orphan conditioning node(s): {pruned}")
+
             # ── Auto-fix output wiring ────────────────────────────────────
             output_fixes = WorkflowManager.ensure_output_wiring(wm.workflow)
             if output_fixes:
@@ -664,6 +884,12 @@ class ClawHarness:
                     )
                     if cfg.image_model:
                         wm.apply_image_model(cfg.image_model)
+                    pruned_rep = WorkflowManager.prune_orphan_conditioning(wm.workflow)
+                    if pruned_rep:
+                        print(
+                            f"[ClawHarness] 🧹 Repair prune: {len(pruned_rep)} "
+                            f"orphan conditioning node(s): {pruned_rep}"
+                        )
                     WorkflowManager.ensure_output_wiring(wm.workflow)
                     self._on_workflow_change(wm.workflow)
 
@@ -693,10 +919,21 @@ class ClawHarness:
                     )
 
             if prompt_id is None:
+                # B3: refund this iteration — no image was produced, so it
+                # shouldn't count against cfg.max_iterations.  Budget for
+                # these is tracked separately via max_extra_agent_invocations.
                 self._record_error(
                     iteration, wm.workflow, submission_error or "unknown queue error"
                 )
                 self._evolution_log.record(evo)
+                extra_non_productive += 1
+                iteration -= 1
+                print(
+                    f"[ClawHarness] ♻️  Iteration did not reach ComfyUI — refunding "
+                    f"iter budget (non-productive {extra_non_productive}/"
+                    f"{cfg.max_extra_agent_invocations}; productive "
+                    f"{iteration}/{cfg.max_iterations})."
+                )
                 continue
 
             # ── Wait for completion ────────────────────────────────────────

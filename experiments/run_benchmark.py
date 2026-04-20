@@ -144,6 +144,10 @@ def _build_paths(model_short: str, bench_short: str, agent_name: str = "") -> di
         "detailed_dir": detailed_dir,
         "evolved_skills_dir": evolved_dir,
         "learned_skills_dir": os.path.join(evolved_dir, "learned-errors"),
+        # B5: per-(model, benchmark) baseline cache.  Shared across runs so
+        # the second execution of a benchmark skips ~34s of baseline gen per
+        # prompt — deterministic given (workflow, prompt, image_model).
+        "baseline_cache_dir": str(experiment_dir / ".baseline_cache"),
     }
 
 
@@ -532,6 +536,9 @@ def run_one(
         agent_name=agent_name,
         max_nodes=20,
         baseline_first=warm_start and not is_baseline,
+        baseline_cache_dir=(
+            paths.get("baseline_cache_dir") if not is_baseline else None
+        ),
         max_images=max_iterations + 2,
         verifier_mode="none" if is_baseline else "vlm",
     )
